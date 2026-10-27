@@ -29,6 +29,7 @@ crossed and by how much. The clinician decides.
   7. [Environment variables](#7-environment-variables)
   8. [The two releases](#8-the-two-releases)
 - [Packaging](#packaging)
+- [Database backup and restore](#database-backup-and-restore)
 - [Continuous integration](#continuous-integration)
 - [Who builds what](#who-builds-what)
 
@@ -461,15 +462,144 @@ The tool ships as a Docker image. The container needs:
 
 ---
 
+## Database backup and restore
+
+The `backup` and `restore` commands use Python's
+[`Connection.backup`](https://docs.python.org/3.13/library/sqlite3.html#sqlite3.Connection.backup).
+Each command opens its source read-only, checks it, copies it to a temporary
+database, and checks the copy with `PRAGMA integrity_check` and
+`PRAGMA foreign_key_check`. The completed file is published only after both
+checks pass. All database connections are closed afterward.
+
+Both commands refuse an existing destination, including a destination created
+by another process while the copy is running. Missing, empty, or corrupt sources
+fail with an error and exit code 1. Recovery commands do not require the
+reference settings file. A successful copy prints both verification results.
+
+### Local database
+
+Run from the repository root, using the Python environment with the project's
+dependencies. The source must be an existing database created by the tool:
+
+```bash
+PYTHONPATH=src python3 -m lab_intake --db lab_intake.db backup \
+  --output backups/lab-1.0.0.db
+
+PYTHONPATH=src python3 -m lab_intake --db restored/lab_intake.db restore \
+  --backup backups/lab-1.0.0.db
+
+PYTHONPATH=src python3 -m lab_intake --db restored/lab_intake.db \
+  history PAT-0002 GLU
+```
+
+Choose a new backup filename for each snapshot. Destination parent directories
+are created as needed. Restore to a new database path so the working history
+remains intact while you verify recovery.
+
+### Docker backup and restore demonstration
+
+The database and backups use separate named volumes. The image prepares both
+mount directories for the non-root application user. These commands use fresh
+demonstration volume names; choose unused names if repeating the demonstration.
+
+Build the development image and create the volumes:
+
+```bash
+docker build -t lab-result-intake:dev .
+docker volume create lab-history-demo
+docker volume create lab-backups-demo
+docker volume create lab-restored-demo
+```
+
+Populate the source history using the repository's synthetic data. Input files
+and settings are mounted read-only:
+
+```bash
+docker run --rm \
+  --mount type=volume,source=lab-history-demo,target=/data \
+  --mount "type=bind,source=$PWD/data,target=/inputs,readonly" \
+  --mount "type=bind,source=$PWD/config,target=/config,readonly" \
+  lab-result-intake:dev run \
+  --results /inputs/results.csv \
+  --orders /inputs/orders.csv \
+  --patients /inputs/patients.csv
+```
+
+Back up the default database, `/data/lab.db`, into the separate backup volume:
+
+```bash
+docker run --rm \
+  --mount type=volume,source=lab-history-demo,target=/data \
+  --mount type=volume,source=lab-backups-demo,target=/backups \
+  lab-result-intake:dev backup --output /backups/lab-1.0.0.db
+```
+
+Actual output from the verified Docker run:
+
+```text
+Backup saved to /backups/lab-1.0.0.db
+PRAGMA integrity_check: ok
+PRAGMA foreign_key_check: ok
+```
+
+Restore into the fresh volume, with the backup volume mounted read-only:
+
+```bash
+docker run --rm \
+  --mount type=volume,source=lab-restored-demo,target=/data \
+  --mount type=volume,source=lab-backups-demo,target=/backups,readonly \
+  lab-result-intake:dev restore --backup /backups/lab-1.0.0.db
+```
+
+Actual output:
+
+```text
+Restored database to /data/lab.db
+PRAGMA integrity_check: ok
+PRAGMA foreign_key_check: ok
+```
+
+Read history from the restored volume in another container:
+
+```bash
+docker run --rm \
+  --mount type=volume,source=lab-restored-demo,target=/data \
+  --mount "type=bind,source=$PWD/config,target=/config,readonly" \
+  lab-result-intake:dev history PAT-0002 GLU
+```
+
+Actual output:
+
+```text
+Casey Okonkwo (PAT-0002), Glucose, Fasting (GLU), reference range 70-99 mg/dL
+
+  2026-10-09        65.7 mg/dL  reported 2026-10-11  flagged: OUT_OF_RANGE
+  2026-10-24        74.1 mg/dL  reported 2026-10-27
+
+This report flags results against the clinic's reference ranges. It does not interpret them. The clinician decides.
+```
+
+The Docker verification compared the entire source, backup, and restored
+databases: all table contents matched, including 12 patients, 53 orders,
+52 results, 8 flags, 1 check run, and 11 rejected rows. Restored history matched
+the original output exactly. Repeating the restore into the same destination
+was refused without changing its contents.
+
+For recovery, stop any writers and use the verified restored volume for future
+container runs. Keep the original volume until recovery is confirmed. The
+automated tests in `tests/test_backup.py` cover the copy and recovery commands,
+committed WAL data, invalid sources, overwrite protection, and patient history.
+
+---
+
 ## Continuous integration
 
 The workflow in `.github/workflows/ci.yml` runs on pushes to every branch and
 on pull requests. It can also be started manually from the Actions tab after
 the workflow is merged into the default branch.
 
-The initial CI environment is Ubuntu 24.04 with Python 3.13. This is the current
-test environment; the application's Python version and Docker base image still
-need to be agreed by the team.
+The CI environment is Ubuntu 24.04 with Python 3.13. The Dockerfile also uses
+Python 3.13.
 
 CI installs `requirements-dev.txt`, then `requirements.txt` if present. Add any
 application dependencies to `requirements.txt`. If the team adopts a package
@@ -491,9 +621,9 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -v
 ```
 
-**No tests is a failing check.** This repository does not have a test suite yet;
-the initial workflow will fail until tests are added. Test failures, collection
-errors, and dependency installation errors also fail the check.
+**No tests is a failing check.** Test failures, collection errors, and dependency
+installation errors also fail the check. The suite includes the synthetic-data
+integration test and backup/restore tests, which run automatically in CI.
 
 To enforce passing tests before merging, a repository administrator must add a
 branch protection rule or ruleset for `main`, require pull requests, and require
