@@ -7,7 +7,7 @@ from datetime import date
 import pytest
 
 from conftest import GOOD_ROW, row
-from lab_intake.loader import FileFormatError, load_orders, load_results
+from lab_intake.loader import RESULT_COLUMNS, FileFormatError, load_orders, load_results
 
 
 # --------------------------------------------------------------------------
@@ -28,6 +28,7 @@ def test_clean_row_becomes_a_lab_result(settings, write_results):
     assert result.unit == "mg/dL"
     assert result.collected_date == date(2026, 3, 1)
     assert result.reported_date == date(2026, 3, 2)
+    assert result.order_id == ""
     assert result.has_value
 
 
@@ -76,8 +77,7 @@ def test_zero_is_a_real_value_not_a_missing_one(settings, write_results):
 def test_no_value_markers_load_as_a_record_with_no_value(settings, write_results, marker):
     """A line with no number is a record, not a reject.
 
-    The sample reached the lab, so the row is kept. No rule currently looks at
-    it, but the loader's job is to record what arrived.
+    The sample reached the lab, so the row is kept. MissingValueRule flags it.
     """
     outcome = load_results(write_results([row(value=marker)]), settings)
 
@@ -148,10 +148,35 @@ def test_unknown_test_code_reason_lists_the_codes_we_do_know(settings, write_res
 
 
 def test_short_row_is_rejected_as_malformed(settings, write_results):
-    outcome = load_results(write_results([GOOD_ROW[:-1]]), settings)
+    # Six fields: reported_date is missing. order_id alone is allowed to be absent.
+    outcome = load_results(write_results([GOOD_ROW[:6]]), settings)
 
     assert outcome.rejected[0].reason_code == "MALFORMED_ROW"
     assert "reported_date" in outcome.rejected[0].reason
+
+
+def test_omitting_only_the_order_id_cell_still_loads(settings, write_results):
+    outcome = load_results(write_results([GOOD_ROW[:7]]), settings)
+
+    assert outcome.rejected == []
+    assert outcome.records[0].order_id == ""
+    assert outcome.records[0].reported_date == date(2026, 3, 2)
+
+
+def test_older_file_without_an_order_id_column_still_loads(settings, write_results):
+    header = [column for column in RESULT_COLUMNS if column != "order_id"]
+    outcome = load_results(write_results([GOOD_ROW[:7]], header=header), settings)
+
+    assert outcome.rejected == []
+    assert outcome.records[0].result_id == "RES-0001"
+    assert outcome.records[0].order_id == ""
+
+
+def test_order_id_is_stored_when_the_lab_sends_one(settings, write_results):
+    outcome = load_results(write_results([row(order_id="  ORD-0042  ")]), settings)
+
+    assert outcome.rejected == []
+    assert outcome.records[0].order_id == "ORD-0042"
 
 
 def test_long_row_is_rejected_as_malformed(settings, write_results):

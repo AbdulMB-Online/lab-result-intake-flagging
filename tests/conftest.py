@@ -78,6 +78,9 @@ def make_result(
     unit: str | None = None,
     result_id: str = "RES-0001",
     patient_id: str = "PAT-0001",
+    order_id: str = "",
+    collected_date: date | None = None,
+    reported_date: date | None = None,
 ) -> LabResult:
     """A LabResult built directly, for testing a rule without a file."""
     units = {"GLU": "mg/dL", "K": "mmol/L", "HGB": "g/dL"}
@@ -87,8 +90,9 @@ def make_result(
         test_code=test_code,
         value=value,
         unit=units[test_code] if unit is None else unit,
-        collected_date=date(2026, 3, 1),
-        reported_date=date(2026, 3, 2),
+        collected_date=collected_date or date(2026, 3, 1),
+        reported_date=reported_date or date(2026, 3, 2),
+        order_id=order_id,
     )
 
 
@@ -96,12 +100,13 @@ def make_order(
     test_code: str = "GLU",
     patient_id: str = "PAT-0001",
     order_id: str = "ORD-0001",
+    ordered_date: date | None = None,
 ) -> OrderedTest:
     return OrderedTest(
         order_id=order_id,
         patient_id=patient_id,
         test_code=test_code,
-        ordered_date=date(2026, 2, 28),
+        ordered_date=ordered_date or date(2026, 2, 28),
     )
 
 
@@ -113,6 +118,7 @@ GOOD_ROW = [
     "mg/dL",
     "2026-03-01",
     "2026-03-02",
+    "",
 ]
 
 

@@ -10,12 +10,12 @@ Two ideas are kept apart on purpose:
 
 A value the lab left blank or marked pending is NOT a rejection. It is a real
 record with no number yet: the row still tells us the sample reached the lab.
-A value the lab sent as garbage ("12.3.4", "ERR") is a rejection, because we
-cannot tell what was meant.
+MissingValueRule flags it. A value the lab sent as garbage ("12.3.4", "ERR")
+is a rejection, because we cannot tell what was meant.
 
-None of the three agreed rules looks at a blank value — they all skip a result
-with no number — so such a row loads and then sits quietly. That is deliberate:
-the loader records what arrived, and the rules decide what is worth saying.
+order_id is optional. Older files leave the column out or the cell blank, and
+those rows still load. The missing-result rule then falls back to the patient,
+the test code, and the dates.
 """
 
 from __future__ import annotations
@@ -36,7 +36,11 @@ RESULT_COLUMNS = (
     "unit",
     "collected_date",
     "reported_date",
+    "order_id",
 )
+
+#: Older result files do not carry order_id. A missing column is not an error.
+OPTIONAL_RESULT_COLUMNS = ("order_id",)
 
 ORDER_COLUMNS = ("order_id", "patient_id", "test_code", "ordered_date")
 
@@ -140,7 +144,7 @@ def load_results(path: str | Path, settings: Settings) -> LoadOutcome:
     outcome = LoadOutcome()
     seen_ids: set[str] = set()
 
-    for line_no, row in _read_rows(path, RESULT_COLUMNS):
+    for line_no, row in _read_rows(path, RESULT_COLUMNS, optional=OPTIONAL_RESULT_COLUMNS):
         record_id = (row.get("result_id") or "").strip() or f"<line {line_no}>"
         try:
             result = _build_result(row, line_no, settings, seen_ids)
@@ -167,7 +171,8 @@ def _build_result(
     settings: Settings,
     seen_ids: set[str],
 ) -> LabResult:
-    _check_shape(row, RESULT_COLUMNS)
+    required = [column for column in RESULT_COLUMNS if column not in OPTIONAL_RESULT_COLUMNS]
+    _check_shape(row, required)
 
     result_id = _require(row, "result_id", "MISSING_RESULT_ID")
     if result_id in seen_ids:
@@ -188,9 +193,10 @@ def _build_result(
             f"{collected.isoformat()}",
         )
 
-    # The unit is recorded exactly as the lab sent it. No rule checks it, but
-    # it is part of the agreed record shape and the rules quote it in messages.
+    # The unit is recorded exactly as the lab sent it. The 1.0.0 rules quote it
+    # and do not judge it; comparing it with the settings is the 1.1.0 rule.
     unit = (row.get("unit") or "").strip()
+    order_id = (row.get("order_id") or "").strip()
 
     return LabResult(
         result_id=result_id,
@@ -200,6 +206,7 @@ def _build_result(
         unit=unit,
         collected_date=collected,
         reported_date=reported,
+        order_id=order_id,
         source_line=line_no,
     )
 
@@ -252,7 +259,9 @@ def load_orders(path: str | Path, settings: Settings) -> LoadOutcome:
 # --------------------------------------------------------------------------
 
 def _read_rows(
-    path: str | Path, expected: Iterable[str]
+    path: str | Path,
+    expected: Iterable[str],
+    optional: Iterable[str] = (),
 ) -> Iterable[tuple[int, dict[str, Any]]]:
     """Yield (line number in the file, row dict) for each data row."""
     path = Path(path)
@@ -269,7 +278,10 @@ def _read_rows(
     with handle:
         reader = csv.DictReader(handle, restkey=EXTRA_FIELDS_KEY, restval=None)
         header = reader.fieldnames or []
-        missing = [column for column in expected if column not in header]
+        optional = set(optional)
+        missing = [
+            column for column in expected if column not in optional and column not in header
+        ]
         if missing:
             raise FileFormatError(
                 f"{path} is missing required column(s): {', '.join(missing)}. "
