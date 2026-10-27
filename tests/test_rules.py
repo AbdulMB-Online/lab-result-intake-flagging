@@ -9,6 +9,8 @@ GLU in the test settings is 70.0-99.0 mg/dL with borderline_pct 0.05, so:
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from conftest import make_order, make_result
@@ -16,6 +18,7 @@ from lab_intake.rules import (
     RULES,
     BorderlineRule,
     MissingResultRule,
+    MissingValueRule,
     OutOfRangeRule,
     ResultRule,
     RuleContext,
@@ -136,6 +139,51 @@ def test_borderline_skips_a_result_with_no_value(settings):
     assert fire(BorderlineRule(), settings, [make_result(None)]) == []
 
 
+def test_borderline_quotes_the_unit_the_lab_sent(settings):
+    """The value wears the lab's unit. The limit wears the settings unit."""
+    flag = fire(BorderlineRule(), settings, [make_result(98.0, unit="mmol/L")])[0]
+
+    assert flag.message.startswith("98 mmol/L is in range")
+    assert "99 mg/dL" in flag.message
+    assert flag.details["sent_unit"] == "mmol/L"
+    assert flag.details["unit"] == "mg/dL"
+
+
+def test_out_of_range_quotes_the_unit_the_lab_sent(settings):
+    flag = fire(OutOfRangeRule(), settings, [make_result(16.4, test_code="K", unit="mg/dL")])[0]
+
+    assert flag.message.startswith("16.4 mg/dL is above")
+    assert "3.5-5.1 mmol/L" in flag.message
+    assert flag.details["sent_unit"] == "mg/dL"
+    assert flag.details["unit"] == "mmol/L"
+
+
+def test_out_of_range_with_no_unit_does_not_invent_one(settings):
+    flag = fire(OutOfRangeRule(), settings, [make_result(64.0, unit="")])[0]
+
+    assert flag.message.startswith("64 is below the reference range 70-99 mg/dL")
+
+
+# --------------------------------------------------------------------------
+# MissingValueRule
+# --------------------------------------------------------------------------
+
+def test_missing_value_flags_a_result_with_no_number(settings):
+    flags = fire(MissingValueRule(), settings, [make_result(None, result_id="RES-PEND")])
+
+    assert len(flags) == 1
+    assert flags[0].rule_code == "MISSING_VALUE"
+    assert flags[0].severity == "high"
+    assert flags[0].message == "No value was reported."
+    assert flags[0].result_id == "RES-PEND"
+    assert "PENDING" not in flags[0].message
+
+
+def test_missing_value_is_quiet_when_a_number_was_reported(settings):
+    assert fire(MissingValueRule(), settings, [make_result(85.0)]) == []
+    assert fire(MissingValueRule(), settings, [make_result(0.0)]) == []
+
+
 # --------------------------------------------------------------------------
 # MissingResultRule
 # --------------------------------------------------------------------------
@@ -191,14 +239,61 @@ def test_missing_result_flags_each_unreturned_order(settings):
     assert sorted(f.order_id for f in flags) == ["ORD-B", "ORD-C"]
 
 
+def test_one_result_does_not_cover_a_second_order_for_the_same_test(settings):
+    """The result names ORD-A, so ORD-B is still missing."""
+    orders = [
+        make_order("GLU", order_id="ORD-A"),
+        make_order("GLU", order_id="ORD-B"),
+    ]
+    results = [make_result(85.0, order_id="ORD-A")]
+
+    flags = fire(MissingResultRule(), settings, results, orders)
+
+    assert [f.order_id for f in flags] == ["ORD-B"]
+    assert flags[0].rule_code == "MISSING_RESULT"
+
+
+def test_a_named_result_is_not_reused_as_the_date_fallback(settings):
+    """ORD-A's result was collected after ORD-B too. It still answers only ORD-A."""
+    orders = [
+        make_order("GLU", order_id="ORD-A", ordered_date=date(2026, 1, 1)),
+        make_order("GLU", order_id="ORD-B", ordered_date=date(2026, 2, 1)),
+    ]
+    results = [make_result(85.0, order_id="ORD-A", collected_date=date(2026, 3, 1))]
+
+    flags = fire(MissingResultRule(), settings, results, orders)
+
+    assert [f.order_id for f in flags] == ["ORD-B"]
+
+
+def test_missing_result_requires_collection_on_or_after_the_order_date(settings):
+    early = make_order("GLU", order_id="ORD-EARLY", ordered_date=date(2026, 4, 1))
+    late = make_order("GLU", order_id="ORD-LATE", ordered_date=date(2026, 6, 1))
+    results = [make_result(85.0, collected_date=date(2026, 4, 1))]
+
+    flags = fire(MissingResultRule(), settings, results, [early, late])
+
+    assert [f.order_id for f in flags] == ["ORD-LATE"]
+
+
+def test_a_result_collected_before_the_order_does_not_count(settings):
+    orders = [make_order("GLU", order_id="ORD-LATE", ordered_date=date(2026, 4, 10))]
+    results = [make_result(85.0, collected_date=date(2026, 4, 9))]
+
+    flags = fire(MissingResultRule(), settings, results, orders)
+
+    assert [f.order_id for f in flags] == ["ORD-LATE"]
+
+
 # --------------------------------------------------------------------------
 # the rule registry and the base class
 # --------------------------------------------------------------------------
 
-def test_the_three_agreed_rules_are_registered():
+def test_the_release_rules_are_registered():
     assert {cls.code for cls in RULES} == {
         "OUT_OF_RANGE",
         "BORDERLINE",
+        "MISSING_VALUE",
         "MISSING_RESULT",
     }
 
@@ -239,8 +334,6 @@ def test_adding_a_rule_takes_only_a_subclass(settings):
             if days <= 1:
                 return None
             return self._flag(result, f"reported {days} days after collection", days=days)
-
-    from datetime import date
 
     from lab_intake.models import LabResult
 

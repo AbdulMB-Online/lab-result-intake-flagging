@@ -75,6 +75,7 @@ def test_generated_file_contains_every_flag_case(run):
     assert set(f.rule_code for f in run.flags) == {
         "OUT_OF_RANGE",
         "BORDERLINE",
+        "MISSING_VALUE",
         "MISSING_RESULT",
     }
 
@@ -94,6 +95,24 @@ def test_generated_file_has_a_value_exactly_at_each_limit(run):
 
 def test_generated_file_has_an_order_that_never_came_back(run):
     assert any(f.rule_code == "MISSING_RESULT" for f in run.flags)
+
+
+def test_generated_file_has_a_pending_value_and_names_orders(generated, run):
+    lines = (generated / "results.csv").read_text().splitlines()
+    header = lines[0].split(",")
+    assert header[-1] == "order_id"
+
+    rows = [line.split(",") for line in lines[1:]]
+    pending_rows = [row for row in rows if len(row) > 4 and row[3] == "PENDING"]
+    assert len(pending_rows) == 1
+    assert pending_rows[0][-1].startswith("ORD-")
+
+    pending = [f for f in run.flags if f.rule_code == "MISSING_VALUE"]
+    missing_orders = {f.order_id for f in run.flags if f.rule_code == "MISSING_RESULT"}
+    assert len(pending) == 1
+    assert pending[0].message == "No value was reported."
+    assert pending[0].result_id == pending_rows[0][0]
+    assert pending_rows[0][-1] not in missing_orders
 
 
 def test_generated_file_contains_every_rejection_reason(run):

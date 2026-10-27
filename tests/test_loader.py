@@ -7,7 +7,7 @@ from datetime import date
 import pytest
 
 from conftest import GOOD_ROW, row
-from lab_intake.loader import FileFormatError, load_orders, load_results
+from lab_intake.loader import RESULT_COLUMNS, FileFormatError, load_orders, load_results
 
 
 # --------------------------------------------------------------------------
@@ -28,6 +28,7 @@ def test_clean_row_becomes_a_lab_result(settings, write_results):
     assert result.unit == "mg/dL"
     assert result.collected_date == date(2026, 3, 1)
     assert result.reported_date == date(2026, 3, 2)
+    assert result.order_id == ""
     assert result.has_value
 
 
@@ -76,8 +77,7 @@ def test_zero_is_a_real_value_not_a_missing_one(settings, write_results):
 def test_no_value_markers_load_as_a_record_with_no_value(settings, write_results, marker):
     """A line with no number is a record, not a reject.
 
-    The sample reached the lab, so the row is kept. No rule currently looks at
-    it, but the loader's job is to record what arrived.
+    The sample reached the lab, so the row is kept. MissingValueRule flags it.
     """
     outcome = load_results(write_results([row(value=marker)]), settings)
 
@@ -148,10 +148,50 @@ def test_unknown_test_code_reason_lists_the_codes_we_do_know(settings, write_res
 
 
 def test_short_row_is_rejected_as_malformed(settings, write_results):
-    outcome = load_results(write_results([GOOD_ROW[:-1]]), settings)
+    # Six fields: reported_date is missing. A blank order_id cell is a separate case.
+    outcome = load_results(write_results([GOOD_ROW[:6]]), settings)
 
     assert outcome.rejected[0].reason_code == "MALFORMED_ROW"
     assert "reported_date" in outcome.rejected[0].reason
+
+
+def test_a_blank_order_id_cell_loads(settings, write_results):
+    """An empty cell is a full row. The columns still line up."""
+    outcome = load_results(write_results([row(order_id="")]), settings)
+
+    assert outcome.rejected == []
+    assert outcome.records[0].order_id == ""
+    assert outcome.records[0].unit == "mg/dL"
+    assert outcome.records[0].reported_date == date(2026, 3, 2)
+
+
+def test_a_short_row_cannot_slide_into_a_blank_order_id(settings, write_results):
+    """Seven cells under an eight-column header. The unit was dropped.
+
+    Treating the missing cell as a blank order id would read the dates as the
+    unit and the two dates. The README rejects any row shorter than its header.
+    """
+    short = ["RES-1", "PAT-0001", "GLU", "85", "2026-03-01", "2026-03-02", "2026-03-03"]
+    outcome = load_results(write_results([short]), settings)
+
+    assert outcome.records == []
+    assert outcome.rejected[0].reason_code == "MALFORMED_ROW"
+
+
+def test_older_file_without_an_order_id_column_still_loads(settings, write_results):
+    header = [column for column in RESULT_COLUMNS if column != "order_id"]
+    outcome = load_results(write_results([GOOD_ROW[:7]], header=header), settings)
+
+    assert outcome.rejected == []
+    assert outcome.records[0].result_id == "RES-0001"
+    assert outcome.records[0].order_id == ""
+
+
+def test_order_id_is_stored_when_the_lab_sends_one(settings, write_results):
+    outcome = load_results(write_results([row(order_id="  ORD-0042  ")]), settings)
+
+    assert outcome.rejected == []
+    assert outcome.records[0].order_id == "ORD-0042"
 
 
 def test_long_row_is_rejected_as_malformed(settings, write_results):
@@ -171,6 +211,30 @@ def test_duplicate_result_id_is_rejected_but_the_first_copy_is_kept(
     assert outcome.records[0].value == 85.0
     assert outcome.rejected[0].reason_code == "DUPLICATE_RESULT_ID"
     assert outcome.rejected[0].source_line == 3
+
+
+def test_a_rejected_row_still_uses_up_its_result_id(settings, write_results):
+    """The id appeared on the broken row, so the later good copy is a duplicate."""
+    rows = [
+        row(result_id="RES-1", value="abc"),
+        row(result_id="RES-1", value="85"),
+    ]
+    outcome = load_results(write_results(rows), settings)
+
+    assert outcome.records == []
+    assert [r.reason_code for r in outcome.rejected] == [
+        "VALUE_NOT_NUMERIC",
+        "DUPLICATE_RESULT_ID",
+    ]
+
+
+def test_a_malformed_row_does_not_use_up_its_result_id(settings, write_results):
+    """A short row's columns are suspect, so the id on it is not remembered."""
+    outcome = load_results(write_results([GOOD_ROW[:6], row(value="90")]), settings)
+
+    assert [r.reason_code for r in outcome.rejected] == ["MALFORMED_ROW"]
+    assert len(outcome.records) == 1
+    assert outcome.records[0].value == 90.0
 
 
 def test_good_and_bad_rows_in_one_file_are_sorted_out(settings, write_results):
@@ -291,3 +355,17 @@ def test_duplicate_order_id_is_rejected(settings, write_orders):
 
     assert len(outcome.records) == 1
     assert outcome.rejected[0].reason_code == "DUPLICATE_ORDER_ID"
+
+
+def test_a_rejected_order_still_uses_up_its_id(settings, write_orders):
+    rows = [
+        ["ORD-1", "", "GLU", "2026-03-01"],
+        ["ORD-1", "PAT-0001", "GLU", "2026-03-01"],
+    ]
+    outcome = load_orders(write_orders(rows), settings)
+
+    assert outcome.records == []
+    assert [r.reason_code for r in outcome.rejected] == [
+        "MISSING_PATIENT_ID",
+        "DUPLICATE_ORDER_ID",
+    ]

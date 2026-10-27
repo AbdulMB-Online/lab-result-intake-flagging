@@ -12,8 +12,12 @@ the tool has to handle, so there is always something to show:
   out of range                one below a low limit, one above a high limit
   borderline                  inside the range but within the borderline band
   exactly at a limit          the boundary case: in range, and borderline
+  missing value               a result that came back PENDING, with no number
   ordered test, no result     an order with no matching result line
   bad rows                    one per rejection reason the loader can give
+
+Each returned result names the order it answers. A blank order_id is allowed;
+the missing-result rule then matches on patient, test code, and date.
 
 Usage:
     python scripts/generate_synthetic_data.py --out data --seed 20251026
@@ -41,6 +45,7 @@ RESULT_HEADER = [
     "unit",
     "collected_date",
     "reported_date",
+    "order_id",
 ]
 ORDER_HEADER = ["order_id", "patient_id", "test_code", "ordered_date"]
 PATIENT_HEADER = ["patient_id", "display_name", "birth_date", "sex"]
@@ -125,6 +130,7 @@ class Builder:
         unit: str,
         collected: date,
         reported: date | None = None,
+        order_id: str = "",
     ) -> str:
         result_id = self.next_result_id()
         reported = reported or collected + timedelta(days=self.rng.randint(1, 3))
@@ -137,6 +143,7 @@ class Builder:
                 unit,
                 collected.isoformat(),
                 reported.isoformat(),
+                order_id,
             ]
         )
         self.produced.add((patient_id, test_code))
@@ -192,13 +199,14 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
     for patient_id in patient_ids:
         for test_code in b.rng.sample(panel, k=b.rng.randint(3, 5)):
             collected = today - timedelta(days=b.rng.randint(2, 40))
-            b.add_order(patient_id, test_code, collected - timedelta(days=1))
+            order_id = b.add_order(patient_id, test_code, collected - timedelta(days=1))
             b.add_result(
                 patient_id,
                 test_code,
                 f"{b.in_range_value(test_code):g}",
                 b.unit_for(test_code),
                 collected,
+                order_id=order_id,
             )
 
     # ------------------------------------------------------------------
@@ -218,7 +226,7 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
             continue
         spec = settings.tests[test_code]
         collected = today - timedelta(days=b.rng.randint(3, 20))
-        b.add_order(patient_id, test_code, collected - timedelta(days=1))
+        order_id = b.add_order(patient_id, test_code, collected - timedelta(days=1))
 
         if case == "out_low":
             value = f"{b.out_of_range_value(test_code, 'low'):g}"
@@ -233,13 +241,34 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
         else:  # at_high_limit
             value = f"{spec.high:g}"
 
-        b.add_result(patient_id, test_code, value, spec.unit, collected)
+        b.add_result(patient_id, test_code, value, spec.unit, collected, order_id=order_id)
 
     # ------------------------------------------------------------------
-    # 3. an ordered test that never came back
+    # 3. a result that came back with no number
     #
-    # Pick a test this patient has no result for, otherwise the earlier
-    # in-range result would satisfy the order and nothing would be flagged.
+    # PENDING is kept, not rejected. It should show up as MISSING_VALUE and
+    # must not also look like a test that never came back.
+    # Dates are fixed so this block does not draw on the random stream.
+    # ------------------------------------------------------------------
+    if "TSH" in b.settings.tests:
+        pending_patient = patient_ids[0]
+        collected = today - timedelta(days=6)
+        order_id = b.add_order(pending_patient, "TSH", collected - timedelta(days=1))
+        b.add_result(
+            pending_patient,
+            "TSH",
+            "PENDING",
+            b.unit_for("TSH"),
+            collected,
+            reported=collected + timedelta(days=1),
+            order_id=order_id,
+        )
+
+    # ------------------------------------------------------------------
+    # 4. an ordered test that never came back
+    #
+    # Pick a test this patient has no result for, so the demo is "nothing
+    # came back" rather than a second order for a test that already returned.
     # ------------------------------------------------------------------
     orphan_patient = patient_ids[-1]
     orphan_code = next(
@@ -250,7 +279,7 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
         # Deliberately no matching result row.
 
     # ------------------------------------------------------------------
-    # 4. bad rows: one per rejection reason the loader can give
+    # 5. bad rows: one per rejection reason the loader can give
     # ------------------------------------------------------------------
     bad_day = (today - timedelta(days=4)).isoformat()
     reported_day = (today - timedelta(days=2)).isoformat()
@@ -259,25 +288,25 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
 
     bad_rows: list[list[str]] = [
         # patient_id cell is empty: cannot be filed against anyone
-        ["RES-90001", "", good_code, "88", good_unit, bad_day, reported_day],
+        ["RES-90001", "", good_code, "88", good_unit, bad_day, reported_day, ""],
         # value is a word, not a number
-        ["RES-90002", patient_ids[1], good_code, "ninety-two", good_unit, bad_day, reported_day],
+        ["RES-90002", patient_ids[1], good_code, "ninety-two", good_unit, bad_day, reported_day, ""],
         # value is garbled: two decimal points
-        ["RES-90003", patient_ids[2], good_code, "9.2.1", good_unit, bad_day, reported_day],
+        ["RES-90003", patient_ids[2], good_code, "9.2.1", good_unit, bad_day, reported_day, ""],
         # test code has no reference range in the settings file
-        ["RES-90004", patient_ids[3], "ZZZ", "4.1", "mmol/L", bad_day, reported_day],
+        ["RES-90004", patient_ids[3], "ZZZ", "4.1", "mmol/L", bad_day, reported_day, ""],
         # collected_date is not a real date
-        ["RES-90005", patient_ids[4], good_code, "91", good_unit, "2025-13-45", reported_day],
+        ["RES-90005", patient_ids[4], good_code, "91", good_unit, "2025-13-45", reported_day, ""],
         # collected_date is in the wrong format
-        ["RES-90006", patient_ids[0], good_code, "91", good_unit, "03/15/2025", reported_day],
+        ["RES-90006", patient_ids[0], good_code, "91", good_unit, "03/15/2025", reported_day, ""],
         # reported before the sample was collected
-        ["RES-90007", patient_ids[1], good_code, "85", good_unit, reported_day, bad_day],
+        ["RES-90007", patient_ids[1], good_code, "85", good_unit, reported_day, bad_day, ""],
         # no result_id, so the result cannot be referred to later
-        ["", patient_ids[2], good_code, "85", good_unit, bad_day, reported_day],
-        # the row is short a field
+        ["", patient_ids[2], good_code, "85", good_unit, bad_day, reported_day, ""],
+        # the row is short a required field
         ["RES-90008", patient_ids[3], good_code, "85", good_unit, bad_day],
         # a negative concentration is not a real measurement
-        ["RES-90009", patient_ids[4], good_code, "-5", good_unit, bad_day, reported_day],
+        ["RES-90009", patient_ids[4], good_code, "-5", good_unit, bad_day, reported_day, ""],
     ]
     for row in bad_rows:
         b.add_raw_result(row)

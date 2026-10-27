@@ -23,6 +23,8 @@ class LabResult:
     unit: str
     collected_date: date
     reported_date: date
+    # Which ordered test this result answers. Empty when the file did not say.
+    order_id: str = ""
     source_line: int = 0
 
     @property

@@ -27,6 +27,13 @@ from .settings import Settings, TestSpec
 SEVERITY_ORDER = ("high", "medium", "low")
 
 
+def _measured(value: float, unit: str) -> str:
+    """The number as the lab sent it, with the lab's unit when one was recorded."""
+    if unit:
+        return f"{value:g} {unit}"
+    return f"{value:g}"
+
+
 @dataclass(frozen=True)
 class RuleContext:
     """Everything a rule is allowed to look at."""
@@ -117,7 +124,7 @@ class OutOfRangeRule(ResultRule):
 
         return self._flag(
             result,
-            f"{value:g} {spec.unit} is {direction} the reference range "
+            f"{_measured(value, result.unit)} is {direction} the reference range "
             f"{spec.low:g}-{spec.high:g} {spec.unit}",
             value=value,
             direction=direction,
@@ -125,6 +132,7 @@ class OutOfRangeRule(ResultRule):
             low=spec.low,
             high=spec.high,
             unit=spec.unit,
+            sent_unit=result.unit,
             distance=round(abs(value - limit), 6),
         )
 
@@ -164,7 +172,7 @@ class BorderlineRule(ResultRule):
         qualifier = "exactly at" if at_limit else f"within {band:g} {spec.unit} of"
         return self._flag(
             result,
-            f"{value:g} {spec.unit} is in range but {qualifier} the {side} limit "
+            f"{_measured(value, result.unit)} is in range but {qualifier} the {side} limit "
             f"({limit:g} {spec.unit})",
             value=value,
             side=side,
@@ -174,15 +182,36 @@ class BorderlineRule(ResultRule):
             low=spec.low,
             high=spec.high,
             unit=spec.unit,
+            sent_unit=result.unit,
         )
+
+
+class MissingValueRule(ResultRule):
+    """The result line arrived, and the value cell had no number in it.
+
+    Blank, PENDING, NA and the other no-value markers all land here. The
+    message does not say which marker it was, or guess why the number is
+    missing. The row is still a result: the sample reached the lab.
+    """
+
+    code = "MISSING_VALUE"
+    description = "Result arrived with no number in it"
+    severity = "high"
+
+    def check(self, result: LabResult, context: RuleContext) -> Flag | None:
+        if result.has_value:
+            return None
+        return self._flag(result, "No value was reported.")
 
 
 class MissingResultRule(ResultRule):
     """A test was ordered and no result line ever came back for it.
 
     This one cannot work from a single result, so it overrides evaluate() and
-    compares the ordered tests against the results that loaded. Matching is on
-    (patient_id, test_code); the flag carries the order_id instead of a
+    compares the ordered tests against the results that loaded. A result that
+    names the order answers that order. A result with no order_id answers an
+    order for the same patient and test only when the sample was collected on
+    or after the order date. The flag carries the order_id instead of a
     result_id, because there is no result to point at.
     """
 
@@ -191,9 +220,8 @@ class MissingResultRule(ResultRule):
     severity = "high"
 
     def evaluate(self, context: RuleContext) -> Iterator[Flag]:
-        returned = {(r.patient_id, r.test_code) for r in context.results}
         for order in context.orders:
-            if order.key in returned:
+            if _order_was_returned(order, context.results):
                 continue
             spec = context.settings.spec(order.test_code)
             name = spec.name if spec else order.test_code
@@ -211,10 +239,33 @@ class MissingResultRule(ResultRule):
             )
 
 
+def _order_was_returned(order: OrderedTest, results: tuple[LabResult, ...]) -> bool:
+    """True when some loaded result answers this order.
+
+    A result that already names an order answers only that order. Using it as
+    a patient-and-test fallback would let one glucose result close every
+    glucose order that patient ever had.
+    """
+    for result in results:
+        if result.order_id and result.order_id == order.order_id:
+            return True
+    for result in results:
+        if result.order_id:
+            continue
+        if (
+            result.patient_id == order.patient_id
+            and result.test_code == order.test_code
+            and result.collected_date >= order.ordered_date
+        ):
+            return True
+    return False
+
+
 #: Every rule the tool knows about, in the order they run.
 RULES: tuple[type[ResultRule], ...] = (
     OutOfRangeRule,
     BorderlineRule,
+    MissingValueRule,
     MissingResultRule,
 )
 

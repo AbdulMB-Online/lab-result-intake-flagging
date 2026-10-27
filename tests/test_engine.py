@@ -33,12 +33,12 @@ def test_a_file_with_no_problems_produces_no_flags(settings, write_results, writ
 
 
 def test_no_result_can_carry_two_flags(settings):
-    """With the three agreed rules, one result never breaks more than one.
+    """With the 1.0.0 rules, one result never breaks more than one.
 
-    Out of range and borderline are mutually exclusive by design, and missing
-    result is about an order rather than a result. This test pins that down:
-    if a fourth rule is ever added that can fire alongside the others, this
-    test is the one that should be revisited.
+    Out of range and borderline are mutually exclusive, a blank value is only
+    MISSING_VALUE, and missing result is about an order rather than a result.
+    The 1.1.0 unit rule can fire beside out of range, and this test is the
+    one to revisit when that rule arrives.
     """
     results = [
         make_result(64.0, result_id="RES-LOW"),      # out of range
@@ -86,11 +86,11 @@ def test_every_rule_runs_over_the_same_results(settings):
     assert "RES-CLEAN" not in {f.result_id for f in flags}
 
 
-def test_a_result_with_no_value_is_left_alone(settings):
-    """Nothing in the agreed three rules looks at a blank value."""
+def test_a_result_with_no_value_is_flagged_missing_value(settings):
     flags = run_rules(RuleContext.build(settings, results=[make_result(None)]))
 
-    assert flags == []
+    assert [f.rule_code for f in flags] == ["MISSING_VALUE"]
+    assert flags[0].message == "No value was reported."
 
 
 def test_flags_are_sorted_high_severity_first(settings):
