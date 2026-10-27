@@ -125,6 +125,34 @@ def test_a_bad_row_in_the_batch_leaves_nothing_saved(db):
     assert count(db, "patients") == 0
 
 
+def test_a_result_keeps_the_order_it_names_and_a_blank_one_is_stored_as_null(db):
+    save_orders(db, [make_order("GLU", order_id="ORD-A")])
+    save_results(
+        db,
+        [
+            make_result(85.0, result_id="RES-NAMED", order_id="ORD-A"),
+            make_result(85.0, result_id="RES-OLDFILE", order_id=""),
+        ],
+    )
+
+    rows = db.execute("SELECT result_id, order_id FROM results ORDER BY result_id").fetchall()
+    assert [tuple(r) for r in rows] == [("RES-NAMED", "ORD-A"), ("RES-OLDFILE", None)]
+
+
+def test_a_result_naming_an_unknown_order_rolls_the_batch_back(db):
+    """The foreign key refuses it, and the good result in the same batch goes too."""
+    with pytest.raises(sqlite3.IntegrityError):
+        save_results(
+            db,
+            [
+                make_result(85.0, result_id="RES-GOOD"),
+                make_result(85.0, result_id="RES-ORPHAN", order_id="ORD-NOBODY-SAVED"),
+            ],
+        )
+
+    assert count(db, "results") == 0
+
+
 def test_the_patients_file_fills_in_details_for_patients_seen_on_results(db):
     save_results(db, [make_result(85.0, patient_id="PAT-A")])
     save_patients(db, [{"patient_id": "PAT-A", "display_name": "Avery Bennett", "sex": "F"}])
