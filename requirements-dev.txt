@@ -1,0 +1,2 @@
+# Test dependencies used locally and by GitHub Actions.
+pytest>=8.4,<10

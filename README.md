@@ -29,6 +29,7 @@ crossed and by how much. The clinician decides.
   7. [Environment variables](#7-environment-variables)
   8. [The two releases](#8-the-two-releases)
 - [Packaging](#packaging)
+- [Continuous integration](#continuous-integration)
 - [Who builds what](#who-builds-what)
 
 ---
@@ -457,6 +458,48 @@ The tool ships as a Docker image. The container needs:
 - the settings file mounted in, not baked into the image, so a clinic can change
   a reference range without a rebuild
 - input files mounted read-only
+
+---
+
+## Continuous integration
+
+The workflow in `.github/workflows/ci.yml` runs on pushes to every branch and
+on pull requests. It can also be started manually from the Actions tab after
+the workflow is merged into the default branch.
+
+The initial CI environment is Ubuntu 24.04 with Python 3.13. This is the current
+test environment; the application's Python version and Docker base image still
+need to be agreed by the team.
+
+CI installs `requirements-dev.txt`, then `requirements.txt` if present. Add any
+application dependencies to `requirements.txt`. If the team adopts a package
+layout that requires installing the project, add that installation to the
+workflow before running tests. CI checks dependency consistency and requires
+SQLite 3.37 or newer before running `python -m pytest -v`.
+
+Name test files `test_*.py` and test functions `test_*`; a `tests/` directory is
+recommended. The command discovers the suite automatically, so new tests do not
+need individual workflow entries. Tests should use temporary databases and
+synthetic data.
+
+To run the same test command locally in an activated virtual environment:
+
+```bash
+python -m pip install -r requirements-dev.txt
+# When requirements.txt exists:
+# python -m pip install -r requirements.txt
+python -m pytest -v
+```
+
+**No tests is a failing check.** This repository does not have a test suite yet;
+the initial workflow will fail until tests are added. Test failures, collection
+errors, and dependency installation errors also fail the check.
+
+To enforce passing tests before merging, a repository administrator must add a
+branch protection rule or ruleset for `main`, require pull requests, and require
+the **Python tests** status check. Run the workflow once so the check is available
+to select. Adding this workflow alone does not enforce branch protection. Once
+it is merged, teammates should update their branches from `main` to include it.
 
 ---
 
