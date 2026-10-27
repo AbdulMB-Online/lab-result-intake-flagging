@@ -20,6 +20,7 @@ from .rules import (
     RuleContext,
     default_rules,
 )
+from .report import render_history, render_report  # noqa: E402
 from .settings import Settings, SettingsError, TestSpec, load_settings  # noqa: E402
 from .storage import (  # noqa: E402
     SavedCheck,
@@ -59,6 +60,8 @@ __all__ = [
     "load_orders",
     "load_results",
     "load_settings",
+    "render_history",
+    "render_report",
     "run_rules",
     "save_check",
     "save_orders",
