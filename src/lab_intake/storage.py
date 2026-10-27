@@ -150,14 +150,15 @@ def save_results(conn: sqlite3.Connection, results: Iterable[LabResult]) -> None
 
     A result_id already in the database is left as it is, so the same file
     can be loaded twice without storing anything twice. Any other problem
-    with any row rolls the whole batch back.
+    with any row rolls the whole batch back, including a result that names
+    an order the database does not have: save the orders first.
     """
     results = list(results)
     with conn:
         _ensure_patients(conn, (r.patient_id for r in results))
         conn.executemany(
             "INSERT INTO results (result_id, patient_id, test_code, value, unit, "
-            "collected_date, reported_date) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "collected_date, reported_date, order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(result_id) DO NOTHING",
             [
                 (
@@ -168,6 +169,7 @@ def save_results(conn: sqlite3.Connection, results: Iterable[LabResult]) -> None
                     r.unit,
                     r.collected_date.isoformat(),
                     r.reported_date.isoformat(),
+                    r.order_id or None,  # the file left it blank
                 )
                 for r in results
             ],
