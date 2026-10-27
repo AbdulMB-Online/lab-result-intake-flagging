@@ -13,9 +13,11 @@ record with no number yet: the row still tells us the sample reached the lab.
 MissingValueRule flags it. A value the lab sent as garbage ("12.3.4", "ERR")
 is a rejection, because we cannot tell what was meant.
 
-order_id is optional. Older files leave the column out or the cell blank, and
-those rows still load. The missing-result rule then falls back to the patient,
-the test code, and the dates.
+order_id is optional. Older files leave the column out, or leave the cell
+blank, and those rows still load. A row with fewer cells than the header is
+still broken: the missing cell may be in the middle, and every column after
+it would be read from the wrong place. The missing-result rule falls back to
+the patient, the test code, and the dates when no order id was given.
 """
 
 from __future__ import annotations
@@ -159,7 +161,6 @@ def load_results(path: str | Path, settings: Settings) -> LoadOutcome:
                 )
             )
         else:
-            seen_ids.add(result.result_id)
             outcome.records.append(result)
 
     return outcome
@@ -171,14 +172,19 @@ def _build_result(
     settings: Settings,
     seen_ids: set[str],
 ) -> LabResult:
-    required = [column for column in RESULT_COLUMNS if column not in OPTIONAL_RESULT_COLUMNS]
-    _check_shape(row, required)
+    # order_id is included. A missing cell is None; a header that omits the
+    # column has no key, which is the older-file case and is not malformed.
+    _check_shape(row, RESULT_COLUMNS)
 
     result_id = _require(row, "result_id", "MISSING_RESULT_ID")
     if result_id in seen_ids:
         raise _RowRejected(
             "DUPLICATE_RESULT_ID", f"result_id '{result_id}' already appeared in this file"
         )
+    # Remember the id before the other checks. A later failure still means
+    # this id appeared in the file. A malformed row never gets here, because
+    # its columns cannot be trusted.
+    seen_ids.add(result_id)
 
     patient_id = _require(row, "patient_id", "MISSING_PATIENT_ID")
     test_code = _parse_test_code(row, settings)
@@ -230,6 +236,7 @@ def load_orders(path: str | Path, settings: Settings) -> LoadOutcome:
                     "DUPLICATE_ORDER_ID",
                     f"order_id '{order_id}' already appeared in this file",
                 )
+            seen_ids.add(order_id)
             order = OrderedTest(
                 order_id=order_id,
                 patient_id=_require(row, "patient_id", "MISSING_PATIENT_ID"),
@@ -248,7 +255,6 @@ def load_orders(path: str | Path, settings: Settings) -> LoadOutcome:
                 )
             )
         else:
-            seen_ids.add(order.order_id)
             outcome.records.append(order)
 
     return outcome
