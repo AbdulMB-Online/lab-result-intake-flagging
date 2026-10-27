@@ -32,6 +32,9 @@ htmlcov/
 .env
 .env.*
 
+# Local SQLite history (the real one lives on a volume)
+*.db
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
