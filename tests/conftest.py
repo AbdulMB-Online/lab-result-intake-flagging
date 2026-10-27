@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from lab_intake.loader import RESULT_COLUMNS, ORDER_COLUMNS  # noqa: E402
 from lab_intake.models import LabResult, OrderedTest  # noqa: E402
 from lab_intake.settings import load_settings  # noqa: E402
+from lab_intake.storage import connect  # noqa: E402
 
 SETTINGS_BODY = {
     "borderline_pct": 0.05,
@@ -42,6 +43,20 @@ def settings_path(tmp_path: Path) -> Path:
 @pytest.fixture
 def settings(settings_path: Path):
     return load_settings(settings_path)
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    """A fresh, empty database file for one test."""
+    return tmp_path / "lab.db"
+
+
+@pytest.fixture
+def db(db_path: Path):
+    """An open connection to the temporary database, closed after the test."""
+    conn = connect(db_path)
+    yield conn
+    conn.close()
 
 
 @pytest.fixture

@@ -4,7 +4,11 @@ Synthetic data only. The tool flags and reports; it never diagnoses a
 condition, interprets a result, or recommends treatment.
 """
 
-from .engine import IntakeRun, intake, run_rules, sort_flags
+#: The release in force. Stored with every check run so history says which
+#: version produced each flag. Bumped with each tagged release.
+__version__ = "1.0.0"
+
+from .engine import IntakeRun, intake, run_rules, sort_flags  # noqa: E402
 from .loader import FileFormatError, load_orders, load_results
 from .models import Flag, LabResult, LoadOutcome, OrderedTest, RejectedRecord
 from .rules import (
@@ -17,7 +21,18 @@ from .rules import (
     RuleContext,
     default_rules,
 )
-from .settings import Settings, SettingsError, TestSpec, load_settings
+from .report import render_history, render_report  # noqa: E402
+from .settings import Settings, SettingsError, TestSpec, load_settings  # noqa: E402
+from .storage import (  # noqa: E402
+    SavedCheck,
+    connect,
+    history,
+    latest_check,
+    save_check,
+    save_orders,
+    save_patients,
+    save_results,
+)
 
 __all__ = [
     "BorderlineRule",
@@ -34,14 +49,25 @@ __all__ = [
     "RejectedRecord",
     "ResultRule",
     "RuleContext",
+    "SavedCheck",
     "Settings",
     "SettingsError",
     "TestSpec",
+    "__version__",
+    "connect",
     "default_rules",
+    "history",
     "intake",
+    "latest_check",
     "load_orders",
     "load_results",
     "load_settings",
+    "render_history",
+    "render_report",
     "run_rules",
+    "save_check",
+    "save_orders",
+    "save_patients",
+    "save_results",
     "sort_flags",
 ]
