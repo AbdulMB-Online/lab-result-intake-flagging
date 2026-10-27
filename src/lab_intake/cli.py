@@ -19,6 +19,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
+from .backup import BackupError, backup_database, restore_database
 from .engine import intake
 from .loader import FileFormatError
 from .report import render_history, render_report
@@ -66,16 +67,35 @@ def build_parser() -> argparse.ArgumentParser:
     hist.add_argument("test_code")
     hist.set_defaults(func=history_command)
 
+    backup = commands.add_parser("backup", help="back up and verify the SQLite database")
+    backup.add_argument("--output", required=True, help="new backup file; must not already exist")
+
+    restore = commands.add_parser("restore", help="restore a verified backup to a new database")
+    restore.add_argument("--backup", required=True, help="the SQLite backup file to restore")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        settings = load_settings(args.settings)
-        with closing(connect(args.db)) as conn:
-            return args.func(args, settings, conn)
-    except (SettingsError, FileFormatError, sqlite3.Error) as exc:
+        # Recovery commands need only the database paths, so they still work
+        # when the reference settings are missing or damaged.
+        if args.command == "backup":
+            path = backup_database(args.db, args.output)
+            print(f"Backup saved to {path}")
+        elif args.command == "restore":
+            path = restore_database(args.backup, args.db)
+            print(f"Restored database to {path}")
+        else:
+            settings = load_settings(args.settings)
+            with closing(connect(args.db)) as conn:
+                return args.func(args, settings, conn)
+
+        print("PRAGMA integrity_check: ok")
+        print("PRAGMA foreign_key_check: ok")
+        return 0
+    except (BackupError, SettingsError, FileFormatError, sqlite3.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
