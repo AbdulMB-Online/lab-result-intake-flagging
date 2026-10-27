@@ -474,7 +474,9 @@ checks pass. All database connections are closed afterward.
 Both commands refuse an existing destination, including a destination created
 by another process while the copy is running. Missing, empty, or corrupt sources
 fail with an error and exit code 1. Recovery commands do not require the
-reference settings file. A successful copy prints both verification results.
+reference settings file. After the checks pass and the copy is published, the
+CLI prints fixed success messages for both checks. These messages confirm that
+verification succeeded; they are not the raw rows returned by the PRAGMAs.
 
 ### Local database
 
