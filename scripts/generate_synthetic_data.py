@@ -9,9 +9,12 @@ The generator is deliberately not purely random. It plants one of every case
 the tool has to handle, so there is always something to show:
 
   clean in-range results      the ordinary case, most of the file
-  out of range                one below a low limit, one above a high limit
-  borderline                  inside the range but within the borderline band
-  exactly at a limit          the boundary case: in range, and borderline
+  out of range                one below a low cut, one above a high cut
+  borderline                  outside the normal range, inside a fixed band
+  exactly on a normal limit   normal, including the limit; not borderline
+  under 18                    a numeric result that is not scored
+  PSA for a female patient    an error, not checked against a male band
+  sex X, sex-specific test    no matching male or female band
   missing value               a result that came back PENDING, with no number
   ordered test, no result     an order with no matching result line
   bad rows                    one per rejection reason the loader can give
@@ -35,7 +38,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from lab_intake.settings import Settings, load_settings  # noqa: E402
+from lab_intake.settings import ResolvedRange, Settings, age_in_years, load_settings  # noqa: E402
 
 RESULT_HEADER = [
     "result_id",
@@ -73,6 +76,7 @@ class Builder:
         self.rng = random.Random(seed)
         self.today = today
         self.patients: list[dict] = []
+        self.patient_by_id: dict[str, dict] = {}
         self.orders: list[dict] = []
         self.results: list[list[str]] = []
         self.produced: set[tuple[str, str]] = set()
@@ -91,24 +95,33 @@ class Builder:
 
     # -- rows --------------------------------------------------------------
 
-    def add_patient(self, index: int) -> str:
+    def add_patient(
+        self, index: int, sex: str | None = None, birth: date | None = None
+    ) -> str:
         patient_id = f"PAT-{index:04d}"
         given = GIVEN_NAMES[index % len(GIVEN_NAMES)]
         surname = SURNAMES[(index * 7) % len(SURNAMES)]
-        birth = date(
-            self.rng.randint(1945, 2006),
-            self.rng.randint(1, 12),
-            self.rng.randint(1, 28),
-        )
-        self.patients.append(
-            {
-                "patient_id": patient_id,
-                "display_name": f"{given} {surname}",
-                "birth_date": birth.isoformat(),
-                "sex": self.rng.choice(["F", "M", "X"]),
-            }
-        )
+        # Adults by default. The under-18 case passes its own birth date.
+        if birth is None:
+            birth = date(
+                self.rng.randint(1945, 2000),
+                self.rng.randint(1, 12),
+                self.rng.randint(1, 28),
+            )
+        row = {
+            "patient_id": patient_id,
+            "display_name": f"{given} {surname}",
+            "birth_date": birth.isoformat(),
+            "sex": sex or self.rng.choice(["F", "M"]),
+        }
+        self.patients.append(row)
+        self.patient_by_id[patient_id] = row
         return patient_id
+
+    def resolved(self, patient_id: str, test_code: str, on: date) -> ResolvedRange | None:
+        patient = self.patient_by_id[patient_id]
+        age = age_in_years(date.fromisoformat(patient["birth_date"]), on)
+        return self.settings.range_for(test_code, patient["sex"], age)
 
     def add_order(self, patient_id: str, test_code: str, ordered: date) -> str:
         order_id = self.next_order_id()
@@ -155,29 +168,55 @@ class Builder:
 
     # -- value helpers -----------------------------------------------------
 
-    def in_range_value(self, test_code: str) -> float:
-        """A comfortable value: inside the range and clear of both bands."""
-        spec = self.settings.tests[test_code]
-        band = self.settings.borderline_band(spec)
-        low, high = spec.low + band * 1.4, spec.high - band * 1.4
-        return self._round(test_code, self.rng.uniform(low, high))
+    def in_range_value(self, spec: ResolvedRange) -> float:
+        """A value inside the normal band, clear of both limits."""
+        margin = spec.span * 0.15
+        low, high = spec.normal_min + margin, spec.normal_max - margin
+        raw = self.rng.uniform(low, high) if low < high else (spec.normal_min + spec.normal_max) / 2
+        value = self._round(spec, raw)
+        if spec.classify(value) != "normal":
+            value = self._round(spec, (spec.normal_min + spec.normal_max) / 2)
+        if spec.classify(value) != "normal":
+            value = spec.normal_min
+        return value
 
-    def borderline_value(self, test_code: str, side: str) -> float:
-        spec = self.settings.tests[test_code]
-        band = self.settings.borderline_band(spec)
+    def borderline_value(self, spec: ResolvedRange, side: str) -> float:
+        """A value in the fixed band outside the normal range."""
+        band = spec.band
         if side == "low":
-            return self._round(test_code, self.rng.uniform(spec.low, spec.low + band * 0.8))
-        return self._round(test_code, self.rng.uniform(spec.high - band * 0.8, spec.high))
+            if band.low_lt is None:
+                raise RuntimeError(f"{spec.code} has no low-side borderline band")
+            raw = (band.low_lt + band.normal_min) / 2
+            zone = "borderline_low"
+        elif band.high_gt is not None:
+            raw = (band.normal_max + band.high_gt) / 2
+            zone = "borderline_high"
+        else:
+            raw = (band.normal_max + band.high_gte) / 2
+            zone = "borderline_high"
+        value = self._round(spec, raw)
+        if spec.classify(value) != zone:
+            raise RuntimeError(f"{spec.code} {side} value {value} classified as {spec.classify(value)}")
+        return value
 
-    def out_of_range_value(self, test_code: str, side: str) -> float:
-        spec = self.settings.tests[test_code]
-        span = spec.span
+    def out_of_range_value(self, spec: ResolvedRange, side: str) -> float:
+        band = spec.band
         if side == "low":
-            return self._round(test_code, max(0.0, spec.low - self.rng.uniform(0.05, 0.3) * span))
-        return self._round(test_code, spec.high + self.rng.uniform(0.05, 0.4) * span)
+            cut = band.low_lt if band.low_lt is not None else spec.normal_min
+            raw = max(0.0, cut - max(0.2, spec.span * 0.2))
+            zone = "low"
+        elif band.high_gte is not None:
+            raw = band.high_gte + max(1.0, spec.span * 0.1)
+            zone = "high"
+        else:
+            raw = band.high_gt + max(0.2, spec.span * 0.2)
+            zone = "high"
+        value = self._round(spec, raw)
+        if spec.classify(value) != zone:
+            raise RuntimeError(f"{spec.code} {side} value {value} classified as {spec.classify(value)}")
+        return value
 
-    def _round(self, test_code: str, value: float) -> float:
-        spec = self.settings.tests[test_code]
+    def _round(self, spec: ResolvedRange, value: float) -> float:
         digits = 2 if spec.span < 10 else 1
         return round(value, digits)
 
@@ -188,7 +227,7 @@ class Builder:
 def build(settings: Settings, seed: int, patient_count: int, today: date) -> Builder:
     b = Builder(settings, seed, today)
     codes = sorted(settings.tests)
-    panel = ["GLU", "HGB", "WBC", "PLT", "K", "NA", "CREA", "TSH", "CHOL", "ALT"]
+    panel = ["GLU", "HGB", "K", "CREA", "TSH", "PSA"]
     panel = [c for c in panel if c in settings.tests] or codes
 
     patient_ids = [b.add_patient(i + 1) for i in range(patient_count)]
@@ -197,14 +236,18 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
     # 1. the ordinary case: ordered, returned, in range
     # ------------------------------------------------------------------
     for patient_id in patient_ids:
-        for test_code in b.rng.sample(panel, k=b.rng.randint(3, 5)):
+        # Leave at least one test unordered so a missing-result case can be planted.
+        for test_code in b.rng.sample(panel, k=b.rng.randint(2, max(2, len(panel) - 1))):
             collected = today - timedelta(days=b.rng.randint(2, 40))
+            spec = b.resolved(patient_id, test_code, collected)
+            if spec is None:
+                continue
             order_id = b.add_order(patient_id, test_code, collected - timedelta(days=1))
             b.add_result(
                 patient_id,
                 test_code,
-                f"{b.in_range_value(test_code):g}",
-                b.unit_for(test_code),
+                f"{b.in_range_value(spec):g}",
+                spec.unit,
                 collected,
                 order_id=order_id,
             )
@@ -216,32 +259,74 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
         ("GLU", "out_low", patient_ids[1]),
         ("K", "out_high", patient_ids[2]),
         ("HGB", "borderline_low", patient_ids[3]),
-        ("CHOL", "borderline_high", patient_ids[4]),
-        ("NA", "at_low_limit", patient_ids[5]),
-        ("PLT", "at_high_limit", patient_ids[6]),
+        ("CREA", "borderline_high", patient_ids[4]),
+        ("GLU", "at_low_limit", patient_ids[5]),
+        ("GLU", "at_high_limit", patient_ids[6]),
     ]
 
     for test_code, case, patient_id in planted:
         if test_code not in settings.tests:
             continue
-        spec = settings.tests[test_code]
         collected = today - timedelta(days=b.rng.randint(3, 20))
+        spec = b.resolved(patient_id, test_code, collected)
+        if spec is None:
+            continue
         order_id = b.add_order(patient_id, test_code, collected - timedelta(days=1))
 
         if case == "out_low":
-            value = f"{b.out_of_range_value(test_code, 'low'):g}"
+            value = f"{b.out_of_range_value(spec, 'low'):g}"
         elif case == "out_high":
-            value = f"{b.out_of_range_value(test_code, 'high'):g}"
+            value = f"{b.out_of_range_value(spec, 'high'):g}"
         elif case == "borderline_low":
-            value = f"{b.borderline_value(test_code, 'low'):g}"
+            value = f"{b.borderline_value(spec, 'low'):g}"
         elif case == "borderline_high":
-            value = f"{b.borderline_value(test_code, 'high'):g}"
+            value = f"{b.borderline_value(spec, 'high'):g}"
         elif case == "at_low_limit":
-            value = f"{spec.low:g}"
-        else:  # at_high_limit
-            value = f"{spec.high:g}"
+            value = f"{spec.normal_min:g}"
+        else:  # at_high_limit: on the normal limit, so it is normal
+            value = f"{spec.normal_max:g}"
 
         b.add_result(patient_id, test_code, value, spec.unit, collected, order_id=order_id)
+
+    # The planted low glucose should sit next to an ordinary glucose for the
+    # same patient, so a history view has more than the one flagged result.
+    glucose_patient = patient_ids[1]
+    glucose_day = today - timedelta(days=30)
+    glucose = b.resolved(glucose_patient, "GLU", glucose_day)
+    if glucose is not None:
+        glucose_order = b.add_order(glucose_patient, "GLU", glucose_day - timedelta(days=1))
+        b.add_result(
+            glucose_patient,
+            "GLU",
+            f"{b.in_range_value(glucose):g}",
+            glucose.unit,
+            glucose_day,
+            order_id=glucose_order,
+        )
+
+    # A patient whose sex is X has no male or female band. Hemoglobin is
+    # sex-specific, so this result is reported and then left unchecked.
+    x_id = b.add_patient(patient_count + 1, sex="X")
+    x_collected = today - timedelta(days=5)
+    x_order = b.add_order(x_id, "HGB", x_collected - timedelta(days=1))
+    b.add_result(x_id, "HGB", "14", b.unit_for("HGB"), x_collected, order_id=x_order)
+
+    # Under 18: the number is flagged for review and is not scored.
+    child_id = b.add_patient(
+        patient_count + 2,
+        sex="F",
+        birth=date(today.year - 10, 1, 15),
+    )
+    child_collected = today - timedelta(days=4)
+    child_order = b.add_order(child_id, "GLU", child_collected - timedelta(days=1))
+    b.add_result(child_id, "GLU", "40", b.unit_for("GLU"), child_collected, order_id=child_order)
+
+    # PSA for a female patient is an error. It is not checked against a male band.
+    if "PSA" in b.settings.tests:
+        psa_id = b.add_patient(patient_count + 3, sex="F", birth=date(1980, 1, 1))
+        psa_collected = today - timedelta(days=3)
+        psa_order = b.add_order(psa_id, "PSA", psa_collected - timedelta(days=1))
+        b.add_result(psa_id, "PSA", "1.2", b.unit_for("PSA"), psa_collected, order_id=psa_order)
 
     # ------------------------------------------------------------------
     # 3. a result that came back with no number

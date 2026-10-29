@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import lab_intake.backup as backup_module
-from conftest import make_order, make_result
+from conftest import DEMO_PATIENTS, make_order, make_result
 from lab_intake.backup import BackupError, backup_database, restore_database
 from lab_intake.engine import IntakeRun, run_rules
 from lab_intake.models import RejectedRecord
@@ -24,14 +24,17 @@ from lab_intake.storage import save_check, save_orders, save_patients, save_resu
 def source_database(db, db_path, settings):
     order = make_order()
     result = make_result(64.0, order_id=order.order_id)
-    save_patients(db, [{"patient_id": result.patient_id, "display_name": "Avery Example"}])
+    save_patients(
+        db,
+        [{**DEMO_PATIENTS[0], "patient_id": result.patient_id, "display_name": "Avery Example"}],
+    )
     save_orders(db, [order])
     save_results(db, [result])
     run = IntakeRun(
         settings=settings,
         results=[result],
         orders=[order],
-        flags=run_rules(RuleContext.build(settings, [result], [order])),
+        flags=run_rules(RuleContext.build(settings, [result], [order], patients=DEMO_PATIENTS)),
         rejected=[RejectedRecord(3, "RES-BAD", "VALUE_NOT_NUMERIC", "value is not a number")],
         rules=default_rules(),
     )

@@ -65,14 +65,23 @@ def intake(
     orders_path: str | Path,
     settings: Settings,
     rules: Sequence[ResultRule] | None = None,
+    patients: Iterable[dict] | None = None,
 ) -> IntakeRun:
-    """Read both files, run every rule, and hand back one object with the lot."""
+    """Read both files, run every rule, and hand back one object with the lot.
+
+    *patients* supplies sex and date of birth so each result is checked against
+    the band for that person. Without them, a numeric result is not compared
+    with a range.
+    """
     result_outcome: LoadOutcome = load_results(results_path, settings)
     order_outcome: LoadOutcome = load_orders(orders_path, settings)
 
     active = list(rules) if rules is not None else default_rules()
     context = RuleContext.build(
-        settings, results=result_outcome.records, orders=order_outcome.records
+        settings,
+        results=result_outcome.records,
+        orders=order_outcome.records,
+        patients=patients,
     )
 
     return IntakeRun(

@@ -9,11 +9,12 @@ the clinician decides, because the tool never interprets a result.
 from __future__ import annotations
 
 import sqlite3
+from datetime import date
 from itertools import groupby
 from typing import Iterable
 
 from .rules import SEVERITY_ORDER
-from .settings import Settings
+from .settings import Settings, age_in_years
 from .storage import SavedCheck
 
 CLINICIAN_DECIDES = (
@@ -70,8 +71,10 @@ def render_history(
         return f"No stored results for {patient_id}, {name} ({test_code}).\n"
 
     patient = rows[0]["display_name"] or patient_id
+    latest = rows[-1]
     lines = [
-        f"{patient} ({patient_id}), {name} ({test_code}), reference range {_range_text(spec)}",
+        f"{patient} ({patient_id}), {name} ({test_code}), reference range "
+        f"{_range_label(settings, test_code, latest)}",
         "",
     ]
     for row in rows:
@@ -97,7 +100,7 @@ def _flag_line(flag: sqlite3.Row, settings: Settings) -> str:
         value = _value_text(flag["value"], flag["unit"])
     return (
         f"  {flag['patient_id']:<10} {flag['test_code']:<5} {value:>16}  "
-        f"range {_range_text(settings.spec(flag['test_code'])):<22} {flag['message']}"
+        f"range {_range_label(settings, flag['test_code'], flag):<22} {flag['message']}"
     )
 
 
@@ -107,7 +110,32 @@ def _value_text(value: float | None, unit: str | None) -> str:
     return f"{value:g} {unit}".rstrip()
 
 
-def _range_text(spec) -> str:
-    if spec is None:
-        return "not in settings"
-    return f"{spec.low:g}-{spec.high:g} {spec.unit}"
+def _range_label(settings: Settings, test_code: str, row: sqlite3.Row) -> str:
+    """The normal range, or a short reason none was applied."""
+    sex, age = _sex_and_age(row)
+    spec = settings.spec(test_code)
+    if spec is not None and age is not None and age < 18:
+        return "under 18"
+    if spec is not None and sex and settings.sex_is_error(test_code, sex):
+        return "not applicable"
+    resolved = settings.range_for(test_code, sex, age)
+    if resolved is None:
+        return "no matching range"
+    return f"{resolved.low:g}-{resolved.high:g} {resolved.unit}"
+
+
+def _sex_and_age(row: sqlite3.Row) -> tuple[str | None, int | None]:
+    """Sex and whole years of age stored on a report row, when both are known."""
+    if "sex" not in row.keys() or "birth_date" not in row.keys():
+        return None, None
+    sex_raw = row["sex"]
+    birth = row["birth_date"]
+    on = row["collected_date"] if "collected_date" in row.keys() else None
+    if not on and "ordered_date" in row.keys():
+        on = row["ordered_date"]
+    sex = str(sex_raw).strip().upper() if sex_raw else None
+    if not sex or not birth or not on:
+        return sex, None
+    born = birth if isinstance(birth, date) else date.fromisoformat(str(birth))
+    when = on if isinstance(on, date) else date.fromisoformat(str(on))
+    return sex, age_in_years(born, when)

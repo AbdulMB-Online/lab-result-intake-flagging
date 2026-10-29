@@ -272,8 +272,12 @@ def latest_check(conn: sqlite3.Connection) -> SavedCheck | None:
 
     flags = conn.execute(
         "SELECT f.rule_code, f.severity, f.patient_id, f.test_code, f.result_id, "
-        "       f.order_id, f.message, r.value, r.unit "
-        "FROM flags f LEFT JOIN results r ON r.result_id = f.result_id "
+        "       f.order_id, f.message, r.value, r.unit, r.collected_date, "
+        "       o.ordered_date, p.sex, p.birth_date "
+        "FROM flags f "
+        "LEFT JOIN results r ON r.result_id = f.result_id "
+        "LEFT JOIN orders o ON o.order_id = f.order_id "
+        "LEFT JOIN patients p ON p.patient_id = f.patient_id "
         "WHERE f.check_run_id = ? ORDER BY f.flag_id",
         (run["check_run_id"],),
     ).fetchall()
@@ -293,7 +297,7 @@ def history(conn: sqlite3.Connection, patient_id: str, test_code: str) -> list[s
     """
     return conn.execute(
         "SELECT r.result_id, r.collected_date, r.reported_date, r.value, r.unit, "
-        "       p.display_name, "
+        "       p.display_name, p.sex, p.birth_date, "
         "       (SELECT group_concat(DISTINCT f.rule_code) FROM flags f "
         "        WHERE f.result_id = r.result_id) AS flags "
         "FROM results r JOIN patients p ON p.patient_id = r.patient_id "
