@@ -6,8 +6,11 @@ function runs inside one transaction, so either the whole batch lands or
 none of it does. The caller closes the connection when the work is done.
 
 Results are keyed on the lab's own result_id, so loading the same file twice
-stores each result once. Every flag belongs to a check run, so the history
-can say which run, release and settings produced it.
+stores each result once. A result that arrives again under the same id with
+different content is a correction: the results table takes the new values
+and the old ones go to result_revisions, so the history shows what changed.
+Every flag belongs to a check run, so the history can say which run, release
+and settings produced it.
 """
 
 from __future__ import annotations
@@ -93,7 +96,23 @@ CREATE TABLE IF NOT EXISTS rejected_rows (
     reason       TEXT NOT NULL
 ) STRICT;
 
+-- The previous version of a result the lab corrected. results holds the
+-- current version; nothing is ever lost.
+CREATE TABLE IF NOT EXISTS result_revisions (
+    revision_id    INTEGER PRIMARY KEY,
+    result_id      TEXT NOT NULL REFERENCES results(result_id),
+    patient_id     TEXT NOT NULL,
+    test_code      TEXT NOT NULL,
+    value          REAL,
+    unit           TEXT NOT NULL,
+    collected_date TEXT NOT NULL,
+    reported_date  TEXT NOT NULL,
+    order_id       TEXT,
+    replaced_at    TEXT NOT NULL
+) STRICT;
+
 CREATE INDEX IF NOT EXISTS idx_results_patient_test ON results(patient_id, test_code);
+CREATE INDEX IF NOT EXISTS idx_revisions_result     ON result_revisions(result_id);
 CREATE INDEX IF NOT EXISTS idx_results_order        ON results(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_patient_test  ON orders(patient_id, test_code);
 CREATE INDEX IF NOT EXISTS idx_flags_run            ON flags(check_run_id);
@@ -164,35 +183,61 @@ def save_orders(conn: sqlite3.Connection, orders: Iterable[OrderedTest]) -> None
         )
 
 
-def save_results(conn: sqlite3.Connection, results: Iterable[LabResult]) -> None:
+RESULT_FIELDS = (
+    "patient_id", "test_code", "value", "unit", "collected_date", "reported_date", "order_id"
+)
+
+
+def save_results(
+    conn: sqlite3.Connection,
+    results: Iterable[LabResult],
+    received_at: datetime | None = None,
+) -> None:
     """Store a batch of clean results in one transaction.
 
-    A result_id already in the database is left as it is, so the same file
-    can be loaded twice without storing anything twice. Any other problem
-    with any row rolls the whole batch back, including a result that names
-    an order the database does not have: save the orders first.
+    A result_id already in the database with the same content is left as it
+    is, so the same file can be loaded twice without storing anything twice.
+    The same id with different content is a correction from the lab: the
+    old version is copied to result_revisions and the result is updated.
+    Any other problem with any row rolls the whole batch back, including a
+    result that names an order the database does not have: save the orders
+    first.
     """
     results = list(results)
+    received_at = received_at or datetime.now(timezone.utc)
     with conn:
         _ensure_patients(conn, (r.patient_id for r in results))
-        conn.executemany(
-            "INSERT INTO results (result_id, patient_id, test_code, value, unit, "
-            "collected_date, reported_date, order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(result_id) DO NOTHING",
-            [
-                (
-                    r.result_id,
-                    r.patient_id,
-                    r.test_code,
-                    r.value,
-                    r.unit,
-                    r.collected_date.isoformat(),
-                    r.reported_date.isoformat(),
-                    r.order_id or None,  # the file left it blank
+        for r in results:
+            incoming = (
+                r.patient_id,
+                r.test_code,
+                r.value,
+                r.unit,
+                r.collected_date.isoformat(),
+                r.reported_date.isoformat(),
+                r.order_id or None,  # the file left it blank
+            )
+            current = conn.execute(
+                f"SELECT {', '.join(RESULT_FIELDS)} FROM results WHERE result_id = ?",
+                (r.result_id,),
+            ).fetchone()
+            if current is None:
+                conn.execute(
+                    f"INSERT INTO results (result_id, {', '.join(RESULT_FIELDS)}) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (r.result_id, *incoming),
                 )
-                for r in results
-            ],
-        )
+            elif tuple(current) != incoming:
+                conn.execute(
+                    f"INSERT INTO result_revisions (result_id, {', '.join(RESULT_FIELDS)}, "
+                    "replaced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (r.result_id, *current, received_at.isoformat(timespec="seconds")),
+                )
+                conn.execute(
+                    f"UPDATE results SET {', '.join(f'{f} = ?' for f in RESULT_FIELDS)} "
+                    "WHERE result_id = ?",
+                    (*incoming, r.result_id),
+                )
         # Recomputed from the stored results, so it is right whether this
         # batch was newer, older, or already there.
         conn.executemany(
@@ -359,13 +404,20 @@ def history(conn: sqlite3.Connection, patient_id: str, test_code: str) -> list[s
     """Every stored result for one patient and test, oldest first.
 
     Each row carries the rule codes that have ever been flagged against it,
-    as a comma-separated string, or None if it was never flagged.
+    as a comma-separated string, or None if it was never flagged, and the
+    value and unit the lab last corrected, or None if never corrected.
     """
     return conn.execute(
         "SELECT r.result_id, r.collected_date, r.reported_date, r.value, r.unit, "
         "       p.display_name, p.sex, p.birth_date, "
         "       (SELECT group_concat(DISTINCT f.rule_code) FROM flags f "
-        "        WHERE f.result_id = r.result_id) AS flags "
+        "        WHERE f.result_id = r.result_id) AS flags, "
+        "       (SELECT count(*) FROM result_revisions v "
+        "        WHERE v.result_id = r.result_id) AS corrections, "
+        "       (SELECT v.value FROM result_revisions v WHERE v.result_id = r.result_id "
+        "        ORDER BY v.revision_id DESC LIMIT 1) AS previous_value, "
+        "       (SELECT v.unit FROM result_revisions v WHERE v.result_id = r.result_id "
+        "        ORDER BY v.revision_id DESC LIMIT 1) AS previous_unit "
         "FROM results r JOIN patients p ON p.patient_id = r.patient_id "
         "WHERE r.patient_id = ? AND r.test_code = ? "
         "ORDER BY r.collected_date, r.result_id",
