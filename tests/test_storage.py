@@ -64,7 +64,8 @@ def test_connect_turns_foreign_keys_on_and_creates_every_table(db):
         row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert tables == {
-        "patients", "orders", "results", "rules", "check_runs", "flags", "rejected_rows"
+        "patients", "orders", "results", "result_revisions", "rules", "check_runs",
+        "flags", "rejected_rows",
     }
 
 
@@ -105,6 +106,48 @@ def test_loading_the_same_file_twice_stores_each_result_once(db):
     save_results(db, results)
 
     assert count(db, "results") == 2
+
+
+def test_a_corrected_result_replaces_the_value_and_keeps_the_old_one(db):
+    save_results(db, [make_result(5.8, "K", result_id="RES-K")])
+    save_results(
+        db, [make_result(4.8, "K", result_id="RES-K")], received_at=RUN_AT
+    )
+
+    current = db.execute("SELECT value FROM results WHERE result_id = 'RES-K'").fetchone()
+    assert current[0] == 4.8
+    revisions = db.execute(
+        "SELECT result_id, value, unit, replaced_at FROM result_revisions"
+    ).fetchall()
+    assert [tuple(r) for r in revisions] == [("RES-K", 5.8, "mmol/L", "2026-03-03T09:00:00+00:00")]
+    assert count(db, "results") == 1
+
+
+def test_the_same_result_sent_again_is_not_a_correction(db):
+    result = make_result(85.0, result_id="RES-1")
+
+    save_results(db, [result])
+    save_results(db, [result])
+
+    assert count(db, "results") == 1
+    assert count(db, "result_revisions") == 0
+
+
+def test_a_broken_correction_rolls_back_and_the_original_stays(db):
+    """The corrected row fails the table's date check, so neither the update
+    nor the copy of the old version survives."""
+    save_results(db, [make_result(5.8, "K", result_id="RES-K")])
+    broken = make_result(
+        4.8, "K", result_id="RES-K",
+        collected_date=date(2026, 3, 5), reported_date=date(2026, 3, 1),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        save_results(db, [make_result(85.0, result_id="RES-NEW"), broken])
+
+    assert db.execute("SELECT value FROM results WHERE result_id = 'RES-K'").fetchone()[0] == 5.8
+    assert count(db, "result_revisions") == 0
+    assert count(db, "results") == 1  # RES-NEW went with it
 
 
 def test_a_bad_row_in_the_batch_leaves_nothing_saved(db):
