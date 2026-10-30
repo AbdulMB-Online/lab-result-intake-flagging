@@ -38,3 +38,12 @@ htmlcov/
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+
+# Local presentation materials
+/presentation/
+
+# Local draft documentation
+/docs_temp/
+
+# Local draft documentation
+/docs_temp/
