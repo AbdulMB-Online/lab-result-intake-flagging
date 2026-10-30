@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -25,10 +25,11 @@ from .models import LabResult, OrderedTest
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS patients (
-    patient_id   TEXT PRIMARY KEY,
-    display_name TEXT,
-    birth_date   TEXT,
-    sex          TEXT
+    patient_id       TEXT PRIMARY KEY,
+    display_name     TEXT,
+    birth_date       TEXT,
+    sex              TEXT,
+    last_result_date TEXT               -- collection date of the newest stored result
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -110,7 +111,25 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _add_last_result_date(conn)
     return conn
+
+
+def _add_last_result_date(conn: sqlite3.Connection) -> None:
+    """Bring a database made before the inactivity column up to date.
+
+    CREATE TABLE IF NOT EXISTS leaves an existing table alone, so the column
+    is added here and filled from the results already stored. Runs once.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(patients)")}
+    if "last_result_date" in columns:
+        return
+    with conn:
+        conn.execute("ALTER TABLE patients ADD COLUMN last_result_date TEXT")
+        conn.execute(
+            "UPDATE patients SET last_result_date = "
+            "(SELECT max(collected_date) FROM results r WHERE r.patient_id = patients.patient_id)"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -173,6 +192,14 @@ def save_results(conn: sqlite3.Connection, results: Iterable[LabResult]) -> None
                 )
                 for r in results
             ],
+        )
+        # Recomputed from the stored results, so it is right whether this
+        # batch was newer, older, or already there.
+        conn.executemany(
+            "UPDATE patients SET last_result_date = "
+            "(SELECT max(collected_date) FROM results r WHERE r.patient_id = ?) "
+            "WHERE patient_id = ?",
+            [(patient_id, patient_id) for patient_id in {r.patient_id for r in results}],
         )
 
 
@@ -264,9 +291,23 @@ class SavedCheck:
 
 def latest_check(conn: sqlite3.Connection) -> SavedCheck | None:
     """The most recent check run, or None if the tool has never run."""
-    run = conn.execute(
-        "SELECT * FROM check_runs ORDER BY check_run_id DESC LIMIT 1"
-    ).fetchone()
+    return load_check(conn)
+
+
+def load_check(conn: sqlite3.Connection, check_run_id: int | None = None) -> SavedCheck | None:
+    """One stored check run with its flags and rejected rows.
+
+    With no id, the most recent run. Returns None when there is no such run,
+    so a report can be shown again later without running the files again.
+    """
+    if check_run_id is None:
+        run = conn.execute(
+            "SELECT * FROM check_runs ORDER BY check_run_id DESC LIMIT 1"
+        ).fetchone()
+    else:
+        run = conn.execute(
+            "SELECT * FROM check_runs WHERE check_run_id = ?", (check_run_id,)
+        ).fetchone()
     if run is None:
         return None
 
@@ -287,6 +328,31 @@ def latest_check(conn: sqlite3.Connection) -> SavedCheck | None:
         (run["check_run_id"],),
     ).fetchall()
     return SavedCheck(run=run, flags=flags, rejected=rejected)
+
+
+def inactive_patients(
+    conn: sqlite3.Connection, as_of: date, years: int = 10
+) -> list[sqlite3.Row]:
+    """Patients whose newest stored result was collected *years* or more ago.
+
+    A patient with no stored result has no date to measure from and is not
+    listed. Oldest first, so the longest-inactive patient is at the top.
+    """
+    cutoff = _years_before(as_of, years).isoformat()
+    return conn.execute(
+        "SELECT patient_id, display_name, last_result_date FROM patients "
+        "WHERE last_result_date IS NOT NULL AND last_result_date <= ? "
+        "ORDER BY last_result_date, patient_id",
+        (cutoff,),
+    ).fetchall()
+
+
+def _years_before(day: date, years: int) -> date:
+    """The same calendar day *years* earlier; 29 February falls back to the 28th."""
+    try:
+        return day.replace(year=day.year - years)
+    except ValueError:
+        return day.replace(year=day.year - years, day=28)
 
 
 def history(conn: sqlite3.Connection, patient_id: str, test_code: str) -> list[sqlite3.Row]:
