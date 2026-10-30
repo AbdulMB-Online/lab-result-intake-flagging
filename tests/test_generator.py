@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import subprocess
 import sys
 from collections import Counter
@@ -40,10 +41,13 @@ def generated(tmp_path_factory):
 @pytest.fixture(scope="module")
 def run(generated):
     """One intake pass over the generated files."""
+    with (generated / "patients.csv").open(newline="", encoding="utf-8") as handle:
+        patients = list(csv.DictReader(handle))
     return intake(
         generated / "results.csv",
         generated / "orders.csv",
         load_settings(PROJECT_SETTINGS),
+        patients=patients,
     )
 
 
@@ -77,6 +81,9 @@ def test_generated_file_contains_every_flag_case(run):
         "BORDERLINE",
         "MISSING_VALUE",
         "MISSING_RESULT",
+        "NO_REFERENCE_RANGE",
+        "UNDER_18",
+        "SEX_NOT_APPLICABLE",
     }
 
 
@@ -87,10 +94,40 @@ def test_generated_file_has_an_out_of_range_value_on_each_side(run):
     assert directions == {"below", "above"}
 
 
-def test_generated_file_has_a_value_exactly_at_each_limit(run):
-    at_limit = [f for f in run.flags if f.details.get("at_limit")]
+def test_generated_file_has_borderline_on_each_side(run):
+    sides = {f.details["side"] for f in run.flags if f.rule_code == "BORDERLINE"}
+    assert sides == {"low", "high"}
 
-    assert {f.details["side"] for f in at_limit} == {"low", "high"}
+
+def test_a_generated_value_on_a_normal_limit_is_not_flagged(generated, run):
+    import csv
+    from datetime import date
+
+    from lab_intake.settings import age_in_years, load_settings
+
+    settings = load_settings(PROJECT_SETTINGS)
+    with (generated / "patients.csv").open(newline="", encoding="utf-8") as handle:
+        patients = {row["patient_id"]: row for row in csv.DictReader(handle)}
+
+    on_limit = []
+    for result in run.results:
+        if result.value is None:
+            continue
+        patient = patients[result.patient_id]
+        age = age_in_years(date.fromisoformat(patient["birth_date"]), result.collected_date)
+        resolved = settings.range_for(result.test_code, patient["sex"], age)
+        if resolved is None:
+            continue
+        if result.value in {resolved.normal_min, resolved.normal_max}:
+            on_limit.append(result.result_id)
+
+    assert on_limit
+    flagged = {
+        f.result_id
+        for f in run.flags
+        if f.rule_code in {"OUT_OF_RANGE", "BORDERLINE", "UNDER_18", "SEX_NOT_APPLICABLE"}
+    }
+    assert flagged.isdisjoint(on_limit)
 
 
 def test_generated_file_has_an_order_that_never_came_back(run):

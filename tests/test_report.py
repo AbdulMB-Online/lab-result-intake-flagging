@@ -5,11 +5,18 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from conftest import make_result, row
+from conftest import DEMO_PATIENTS, make_result, row
 from lab_intake.engine import IntakeRun, intake, run_rules
 from lab_intake.report import CLINICIAN_DECIDES, render_history, render_report
 from lab_intake.rules import RuleContext, default_rules
-from lab_intake.storage import history, latest_check, save_check, save_orders, save_results
+from lab_intake.storage import (
+    history,
+    latest_check,
+    save_check,
+    save_orders,
+    save_patients,
+    save_results,
+)
 
 RUN_AT = datetime(2026, 3, 3, 9, 0, tzinfo=timezone.utc)
 
@@ -21,7 +28,8 @@ def has_columns(text: str, *columns: str) -> bool:
 
 
 def run_and_save(db, settings, results_path, orders_path):
-    run = intake(results_path, orders_path, settings)
+    run = intake(results_path, orders_path, settings, patients=DEMO_PATIENTS)
+    save_patients(db, DEMO_PATIENTS)
     save_orders(db, run.orders)
     save_results(db, run.results)
     save_check(db, run, str(results_path), str(orders_path), run_at=RUN_AT)
@@ -34,7 +42,7 @@ def test_report_groups_flags_by_rule_with_patient_test_value_unit_and_range(
     results = write_results(
         [
             row(result_id="RES-LOW", patient_id="PAT-0001", value="64"),
-            row(result_id="RES-NEAR", patient_id="PAT-0002", value="98"),
+            row(result_id="RES-NEAR", patient_id="PAT-0002", value="110"),
             row(result_id="RES-HIGHK", patient_id="PAT-0003", test_code="K", value="5.4", unit="mmol/L"),
         ]
     )
@@ -49,7 +57,7 @@ def test_report_groups_flags_by_rule_with_patient_test_value_unit_and_range(
     # Each line carries patient, test, the lab's value and unit, and the settings' range.
     assert has_columns(text, "PAT-0001", "GLU", "64 mg/dL", "range 70-99 mg/dL")
     assert has_columns(text, "PAT-0003", "K", "5.4 mmol/L", "range 3.5-5.1 mmol/L")
-    assert has_columns(text, "PAT-0002", "GLU", "98 mg/dL", "range 70-99 mg/dL")
+    assert has_columns(text, "PAT-0002", "GLU", "110 mg/dL", "range 70-99 mg/dL")
     assert has_columns(text, "PAT-0004", "HGB", "no result", "range 12-17.5 g/dL")
     assert text.rstrip().endswith(CLINICIAN_DECIDES)
 
@@ -93,8 +101,9 @@ def test_history_shows_each_stored_result_in_order_and_which_were_flagged(settin
         make_result(85.0, result_id="RES-1", patient_id="PAT-0001"),
         make_result(64.0, result_id="RES-2", patient_id="PAT-0001"),
     ]
+    save_patients(db, DEMO_PATIENTS)
     save_results(db, results)
-    flags = run_rules(RuleContext.build(settings, results=results))
+    flags = run_rules(RuleContext.build(settings, results=results, patients=DEMO_PATIENTS))
     run = IntakeRun(settings=settings, results=results, flags=flags, rules=default_rules())
     save_check(db, run, run_at=RUN_AT)
 

@@ -101,9 +101,12 @@ def test_generated_files_produce_a_report_and_persistent_patient_history(tmp_pat
         assert runs[0]["orders_file"] == str(data_dir / "orders.csv")
         assert flag_counts == {
             "OUT_OF_RANGE": 2,
-            "BORDERLINE": 4,
+            "BORDERLINE": 2,
             "MISSING_VALUE": 1,
             "MISSING_RESULT": 1,
+            "NO_REFERENCE_RANGE": 1,
+            "UNDER_18": 1,
+            "SEX_NOT_APPLICABLE": 1,
         }
         assert {row["check_run_id"] for row in rejected} == {runs[0]["check_run_id"]}
         assert conn.execute(
@@ -141,6 +144,10 @@ def test_generated_files_produce_a_report_and_persistent_patient_history(tmp_pat
     assert f"Rejected rows ({len(rejected)})" in report
     assert "VALUE_NOT_NUMERIC" in report
     assert "range 70-99 mg/dL" in report
+    assert "Patient is under 18" in report
+    assert "range under 18" in report
+    assert "PSA reported for a female patient is an error and was not checked." in report
+    assert "range not applicable" in report
     assert "The clinician decides." in report
 
     # A new process must read the persisted history after the run has exited.

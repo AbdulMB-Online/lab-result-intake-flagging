@@ -13,6 +13,16 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class PatientDemographics:
+    """Sex and date of birth for one patient, used to pick a reference range."""
+
+    patient_id: str
+    sex: str | None
+    birth_date: date | None
+    display_name: str | None = None
+
+
+@dataclass(frozen=True)
 class LabResult:
     """One clean result line. Only the loader builds these."""
 

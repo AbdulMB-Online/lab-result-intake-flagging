@@ -1,7 +1,7 @@
 """The command line: run the whole tool, or show one patient's history.
 
     python -m lab_intake run --results data/results.csv --orders data/orders.csv
-    python -m lab_intake history PAT-0003 PLT
+    python -m lab_intake history PAT-0003 GLU
 
 Two environment variables point at the files that live outside the code:
 LAB_DB_PATH for the database and LAB_SETTINGS_PATH for the settings file.
@@ -101,10 +101,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.Connection) -> int:
-    run = intake(args.results, args.orders, settings)
+    patient_rows = read_patients(args.patients) if args.patients else []
+    run = intake(args.results, args.orders, settings, patients=patient_rows)
 
-    if args.patients:
-        save_patients(conn, read_patients(args.patients))
+    if patient_rows:
+        save_patients(conn, patient_rows)
     save_orders(conn, run.orders)
     save_results(conn, run.results)
     check_run_id = save_check(conn, run, results_file=args.results, orders_file=args.orders)

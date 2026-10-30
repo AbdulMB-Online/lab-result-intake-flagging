@@ -48,12 +48,16 @@ def test_run_checks_the_files_saves_the_history_and_prints_the_report(
 
 
 def test_history_shows_a_patients_results_after_a_run(
-    settings_path, db_path, write_results, write_orders, capsys
+    tmp_path, settings_path, db_path, write_results, write_orders, capsys
 ):
     results = write_results([row(result_id="RES-LOW", value="64")])
     orders = write_orders([])
+    patients = write_patients(tmp_path, [["PAT-0001", "Avery Bennett", "1970-01-01", "F"]])
     common = ["--db", str(db_path), "--settings", str(settings_path)]
-    main([*common, "run", "--results", str(results), "--orders", str(orders)])
+    main([
+        *common, "run", "--results", str(results), "--orders", str(orders),
+        "--patients", str(patients),
+    ])
     capsys.readouterr()
 
     code = main([*common, "history", "PAT-0001", "glu"])
