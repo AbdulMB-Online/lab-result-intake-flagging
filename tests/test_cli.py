@@ -77,16 +77,54 @@ def test_a_missing_settings_file_stops_the_tool_and_names_the_file(tmp_path, db_
     assert f"Settings file not found: {missing}" in capsys.readouterr().err
 
 
+def test_report_shows_a_stored_run_again_without_the_input_files(
+    tmp_path, settings_path, db_path, write_results, write_orders, capsys
+):
+    results = write_results([row(result_id="RES-LOW", value="64")])
+    orders = write_orders([])
+    patients = write_patients(tmp_path, [["PAT-0001", "Avery Bennett", "1970-01-01", "F"]])
+    common = ["--db", str(db_path), "--settings", str(settings_path)]
+    main([*common, "run", "--results", str(results), "--orders", str(orders),
+          "--patients", str(patients)])
+    first = capsys.readouterr().out
+    for path in (results, orders, patients):
+        path.unlink()  # the report must come from the database alone
+
+    assert main([*common, "report"]) == 0
+    again = capsys.readouterr().out
+    assert again in first
+    assert "OUT_OF_RANGE (1)" in again
+
+    assert main([*common, "report", "--run", "1"]) == 0
+    assert capsys.readouterr().out == again
+
+
+def test_report_for_a_run_that_does_not_exist_is_an_error(settings_path, db_path, capsys):
+    code = main(["--db", str(db_path), "--settings", str(settings_path), "report", "--run", "7"])
+
+    assert code == 1
+    assert "no check run 7" in capsys.readouterr().err
+
+
+def test_report_before_any_run_says_so(settings_path, db_path, capsys):
+    code = main(["--db", str(db_path), "--settings", str(settings_path), "report"])
+
+    assert code == 0
+    assert capsys.readouterr().out == "No check has been run yet.\n"
+
+
 def test_a_missing_input_file_stops_the_tool_and_names_the_file(
     tmp_path, settings_path, db_path, write_orders, capsys
 ):
     orders = write_orders([])
+    patients = write_patients(tmp_path, [["PAT-0001", "Avery Bennett", "1970-01-01", "F"]])
     missing = tmp_path / "nowhere.csv"
 
     code = main(
         [
             "--db", str(db_path), "--settings", str(settings_path),
             "run", "--results", str(missing), "--orders", str(orders),
+            "--patients", str(patients),
         ]
     )
 

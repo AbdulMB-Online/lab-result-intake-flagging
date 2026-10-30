@@ -14,6 +14,7 @@ from lab_intake.storage import (
     connect,
     history,
     latest_check,
+    load_check,
     save_check,
     save_orders,
     save_patients,
@@ -215,6 +216,19 @@ def test_a_flag_that_cannot_be_stored_leaves_no_trace_of_the_check(settings, db)
     assert count(db, "check_runs") == 0
     assert count(db, "flags") == 0
     assert latest_check(db) is None
+
+
+def test_any_stored_check_can_be_loaded_again_by_its_number(settings, db):
+    result = make_result(64.0, result_id="RES-LOW")
+    save_results(db, [result])
+    first = save_check(db, a_run(settings, flags=[out_of_range(result)]), run_at=RUN_AT)
+    second = save_check(db, a_run(settings), run_at=RUN_AT)
+
+    assert load_check(db, first).run["check_run_id"] == first
+    assert [f["rule_code"] for f in load_check(db, first).flags] == ["OUT_OF_RANGE"]
+    assert load_check(db, second).flags == []
+    assert load_check(db).run["check_run_id"] == second  # no number means the latest
+    assert load_check(db, 99) is None
 
 
 def test_the_latest_check_is_the_most_recent_run_only(settings, db):

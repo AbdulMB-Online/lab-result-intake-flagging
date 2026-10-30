@@ -1,6 +1,9 @@
-"""The command line: run the whole tool, or show one patient's history.
+"""The command line: run the whole tool, show a stored report, or show history.
 
-    python -m lab_intake run --results data/results.csv --orders data/orders.csv
+    python -m lab_intake run --results data/results.csv --orders data/orders.csv \
+        --patients data/patients.csv
+    python -m lab_intake report
+    python -m lab_intake report --run 3
     python -m lab_intake history PAT-0003 GLU
 
 Two environment variables point at the files that live outside the code:
@@ -27,7 +30,7 @@ from .settings import Settings, SettingsError, load_settings
 from .storage import (
     connect,
     history,
-    latest_check,
+    load_check,
     save_check,
     save_orders,
     save_patients,
@@ -59,8 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="check a result file and print the report")
     run.add_argument("--results", required=True, help="the lab's result file (CSV)")
     run.add_argument("--orders", required=True, help="the clinic's ordered tests file (CSV)")
-    run.add_argument("--patients", help="optional patient details file (CSV)")
+    run.add_argument(
+        "--patients",
+        required=True,
+        help="patient details file (CSV); sex and birth date pick each result's range",
+    )
     run.set_defaults(func=run_command)
+
+    report = commands.add_parser("report", help="show a stored report again without re-running")
+    report.add_argument("--run", type=int, help="check run number (default: the latest)")
+    report.set_defaults(func=report_command)
 
     hist = commands.add_parser("history", help="show one patient's results for one test")
     hist.add_argument("patient_id")
@@ -101,11 +112,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.Connection) -> int:
-    patient_rows = read_patients(args.patients) if args.patients else []
+    patient_rows = read_patients(args.patients)
     run = intake(args.results, args.orders, settings, patients=patient_rows)
 
-    if patient_rows:
-        save_patients(conn, patient_rows)
+    save_patients(conn, patient_rows)
     save_orders(conn, run.orders)
     save_results(conn, run.results)
     check_run_id = save_check(conn, run, results_file=args.results, orders_file=args.orders)
@@ -115,7 +125,17 @@ def run_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.Conn
         f"Check run {check_run_id} recorded {len(run.flags)} flags "
         f"and {len(run.rejected)} rejected rows.\n"
     )
-    print(render_report(latest_check(conn), settings), end="")
+    print(render_report(load_check(conn, check_run_id), settings), end="")
+    return 0
+
+
+def report_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.Connection) -> int:
+    """Render a stored check run. The fallback when the emailed copy is lost."""
+    check = load_check(conn, args.run)
+    if check is None and args.run is not None:
+        print(f"error: no check run {args.run} in the database", file=sys.stderr)
+        return 1
+    print(render_report(check, settings), end="")
     return 0
 
 

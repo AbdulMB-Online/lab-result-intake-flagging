@@ -264,9 +264,23 @@ class SavedCheck:
 
 def latest_check(conn: sqlite3.Connection) -> SavedCheck | None:
     """The most recent check run, or None if the tool has never run."""
-    run = conn.execute(
-        "SELECT * FROM check_runs ORDER BY check_run_id DESC LIMIT 1"
-    ).fetchone()
+    return load_check(conn)
+
+
+def load_check(conn: sqlite3.Connection, check_run_id: int | None = None) -> SavedCheck | None:
+    """One stored check run with its flags and rejected rows.
+
+    With no id, the most recent run. Returns None when there is no such run,
+    so a report can be shown again later without running the files again.
+    """
+    if check_run_id is None:
+        run = conn.execute(
+            "SELECT * FROM check_runs ORDER BY check_run_id DESC LIMIT 1"
+        ).fetchone()
+    else:
+        run = conn.execute(
+            "SELECT * FROM check_runs WHERE check_run_id = ?", (check_run_id,)
+        ).fetchone()
     if run is None:
         return None
 
