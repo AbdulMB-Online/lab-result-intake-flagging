@@ -17,6 +17,7 @@ the tool has to handle, so there is always something to show:
   sex X, sex-specific test    no matching male or female band
   missing value               a result that came back PENDING, with no number
   ordered test, no result     an order with no matching result line
+  inactive 10+ years          two patients whose last order and result are older
   bad rows                    one per rejection reason the loader can give
 
 Each returned result names the order it answers. A blank order_id is allowed;
@@ -66,6 +67,14 @@ SURNAMES = [
 
 #: Smallest patient count that still has somebody for every planted case.
 MIN_PATIENTS = 8
+
+#: Planted patients whose last order and result are more than ten years old.
+#: Fixed ids so a later inactivity check can find them without depending on
+#: --patients. PAT-9001 was last seen 11 years ago; PAT-9002, 15 years ago.
+INACTIVE_PATIENTS = (
+    (9001, "M", date(1960, 3, 14), 11),
+    (9002, "F", date(1954, 7, 22), 15),
+)
 
 
 class Builder:
@@ -222,6 +231,14 @@ class Builder:
 
     def unit_for(self, test_code: str) -> str:
         return self.settings.tests[test_code].unit
+
+
+def years_before(day: date, years: int) -> date:
+    """The same month and day, *years* earlier. February 29 falls back to the 28th."""
+    try:
+        return day.replace(year=day.year - years)
+    except ValueError:
+        return day.replace(year=day.year - years, day=28)
 
 
 def build(settings: Settings, seed: int, patient_count: int, today: date) -> Builder:
@@ -399,6 +416,31 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
     # The same result_id twice in one file: the second copy is refused, so a
     # result is never counted or stored twice.
     b.add_raw_result(list(b.results[0]))
+
+    # ------------------------------------------------------------------
+    # 6. two patients inactive for more than 10 years
+    #
+    # Each has one old, in-range glucose and the order it answers, and nothing
+    # since. A later check can flag them from the dates. The rows are not
+    # flagged here: both patients were adults, the value is inside the range,
+    # and the order came back.
+    # ------------------------------------------------------------------
+    for index, sex, birth, years_inactive in INACTIVE_PATIENTS:
+        patient_id = b.add_patient(index, sex=sex, birth=birth)
+        collected = years_before(today, years_inactive) - timedelta(days=1)
+        spec = b.resolved(patient_id, "GLU", collected)
+        if spec is None:
+            raise RuntimeError(f"{patient_id} has no adult glucose range on {collected}")
+        order_id = b.add_order(patient_id, "GLU", collected - timedelta(days=1))
+        b.add_result(
+            patient_id,
+            "GLU",
+            f"{b.in_range_value(spec):g}",
+            spec.unit,
+            collected,
+            reported=collected + timedelta(days=1),
+            order_id=order_id,
+        )
 
     # Shuffle so the bad rows are not all at the bottom.
     b.rng.shuffle(b.results)

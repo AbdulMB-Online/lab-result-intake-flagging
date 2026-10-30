@@ -6,6 +6,7 @@ import csv
 import subprocess
 import sys
 from collections import Counter
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -164,6 +165,49 @@ def test_generated_file_contains_every_rejection_reason(run):
         "MALFORMED_ROW",
         "DUPLICATE_RESULT_ID",
     } <= set(r.reason_code for r in run.rejected)
+
+
+def test_generated_file_has_two_patients_inactive_for_over_ten_years(generated):
+    """PAT-9001 and PAT-9002 were last seen more than 10 years before --today."""
+    today = date(2026, 10, 26)
+    ten_years_ago = date(today.year - 10, today.month, today.day)
+
+    with (generated / "patients.csv").open(newline="", encoding="utf-8") as handle:
+        patients = list(csv.DictReader(handle))
+    with (generated / "orders.csv").open(newline="", encoding="utf-8") as handle:
+        orders = list(csv.DictReader(handle))
+    with (generated / "results.csv").open(newline="", encoding="utf-8") as handle:
+        results = list(csv.DictReader(handle))
+
+    by_id = {row["patient_id"]: row for row in patients}
+    assert {"PAT-9001", "PAT-9002"} <= set(by_id)
+
+    def activity(patient_id: str) -> list[date]:
+        dates = [
+            date.fromisoformat(row["ordered_date"])
+            for row in orders
+            if row["patient_id"] == patient_id
+        ]
+        for row in results:
+            if row["patient_id"] != patient_id:
+                continue
+            collected = row.get("collected_date") or ""
+            try:
+                dates.append(date.fromisoformat(collected))
+            except ValueError:
+                continue
+        return dates
+
+    inactive = []
+    for patient_id in by_id:
+        dates = activity(patient_id)
+        if dates and max(dates) < ten_years_ago:
+            inactive.append(patient_id)
+
+    assert inactive == ["PAT-9001", "PAT-9002"]
+    for patient_id in inactive:
+        assert activity(patient_id), patient_id
+        assert by_id[patient_id]["sex"] in {"F", "M"}
 
 
 def test_generated_patients_are_synthetic_and_complete(generated):
