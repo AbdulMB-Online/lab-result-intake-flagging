@@ -5,6 +5,7 @@
     python -m lab_intake report
     python -m lab_intake report --run 3
     python -m lab_intake history PAT-0003 GLU
+    python -m lab_intake inactive --years 10
 
 Two environment variables point at the files that live outside the code:
 LAB_DB_PATH for the database and LAB_SETTINGS_PATH for the settings file.
@@ -20,6 +21,7 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
+from datetime import date
 from pathlib import Path
 
 from .backup import BackupError, backup_database, restore_database
@@ -30,6 +32,7 @@ from .settings import Settings, SettingsError, load_settings
 from .storage import (
     connect,
     history,
+    inactive_patients,
     load_check,
     save_check,
     save_orders,
@@ -77,6 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
     hist.add_argument("patient_id")
     hist.add_argument("test_code")
     hist.set_defaults(func=history_command)
+
+    inactive = commands.add_parser("inactive", help="list patients with no result in years")
+    inactive.add_argument("--years", type=int, default=10, help="how many years (default: 10)")
+    inactive.add_argument(
+        "--as-of", type=date.fromisoformat, default=None, help="YYYY-MM-DD (default: today)"
+    )
+    inactive.set_defaults(func=inactive_command)
 
     backup = commands.add_parser("backup", help="back up and verify the SQLite database")
     backup.add_argument("--output", required=True, help="new backup file; must not already exist")
@@ -143,6 +153,19 @@ def history_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.
     test_code = args.test_code.upper()
     rows = history(conn, args.patient_id, test_code)
     print(render_history(args.patient_id, test_code, rows, settings), end="")
+    return 0
+
+
+def inactive_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.Connection) -> int:
+    as_of = args.as_of or date.today()
+    rows = inactive_patients(conn, as_of, args.years)
+    print(
+        f"Patients with no result collected in {args.years} years or more, "
+        f"as of {as_of.isoformat()}: {len(rows)}"
+    )
+    for row in rows:
+        name = row["display_name"] or "(no name on file)"
+        print(f"  {row['patient_id']:<10} {name:<24} last result {row['last_result_date']}")
     return 0
 
 

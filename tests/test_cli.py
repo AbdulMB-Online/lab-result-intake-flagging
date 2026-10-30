@@ -113,6 +113,34 @@ def test_report_before_any_run_says_so(settings_path, db_path, capsys):
     assert capsys.readouterr().out == "No check has been run yet.\n"
 
 
+def test_inactive_lists_patients_with_no_result_in_ten_years(
+    tmp_path, settings_path, db_path, write_results, write_orders, capsys
+):
+    results = write_results(
+        [
+            row(result_id="RES-OLD", patient_id="PAT-0001", collected_date="2012-01-01", reported_date="2012-01-02"),
+            row(result_id="RES-NEW", patient_id="PAT-0002", collected_date="2026-03-01", reported_date="2026-03-02"),
+        ]
+    )
+    orders = write_orders([])
+    patients = write_patients(
+        tmp_path,
+        [["PAT-0001", "Avery Bennett", "1970-01-01", "F"], ["PAT-0002", "Blake Hollins", "1970-01-01", "M"]],
+    )
+    common = ["--db", str(db_path), "--settings", str(settings_path)]
+    main([*common, "run", "--results", str(results), "--orders", str(orders),
+          "--patients", str(patients)])
+    capsys.readouterr()
+
+    code = main([*common, "inactive", "--as-of", "2026-10-30"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "10 years or more, as of 2026-10-30: 1" in out
+    assert re.search(r"PAT-0001\s+Avery Bennett\s+last result 2012-01-01", out)
+    assert "PAT-0002" not in out
+
+
 def test_a_missing_input_file_stops_the_tool_and_names_the_file(
     tmp_path, settings_path, db_path, write_orders, capsys
 ):

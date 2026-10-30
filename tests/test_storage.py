@@ -13,6 +13,7 @@ from lab_intake.rules import default_rules
 from lab_intake.storage import (
     connect,
     history,
+    inactive_patients,
     latest_check,
     load_check,
     save_check,
@@ -249,6 +250,67 @@ def test_a_rule_is_registered_once_however_many_runs_use_it(settings, db):
     save_check(db, a_run(settings), run_at=RUN_AT)
 
     assert count(db, "rules") == len(default_rules())
+
+
+# --------------------------------------------------------------------------
+# inactivity
+# --------------------------------------------------------------------------
+
+def test_saving_results_records_each_patients_newest_collection_date(db):
+    save_results(
+        db,
+        [
+            make_result(85.0, result_id="RES-NEW", patient_id="PAT-A", collected_date=date(2026, 3, 1)),
+            make_result(85.0, result_id="RES-OLD", patient_id="PAT-A", collected_date=date(2016, 3, 1)),
+            make_result(85.0, result_id="RES-B", patient_id="PAT-B", collected_date=date(2014, 1, 1)),
+        ],
+    )
+    # An older batch arriving later must not move the date backwards.
+    save_results(
+        db, [make_result(85.0, result_id="RES-OLDER", patient_id="PAT-A", collected_date=date(2010, 1, 1))]
+    )
+
+    rows = db.execute("SELECT patient_id, last_result_date FROM patients ORDER BY patient_id").fetchall()
+    assert [tuple(r) for r in rows] == [("PAT-A", "2026-03-01"), ("PAT-B", "2014-01-01")]
+
+
+def test_inactive_patients_are_those_with_no_result_in_ten_years(db):
+    save_patients(db, [{"patient_id": "PAT-NEVER", "display_name": "No Results Yet"}])
+    save_results(
+        db,
+        [
+            make_result(85.0, result_id="RES-1", patient_id="PAT-RECENT", collected_date=date(2025, 6, 1)),
+            make_result(85.0, result_id="RES-2", patient_id="PAT-EXACT", collected_date=date(2016, 10, 30)),
+            make_result(85.0, result_id="RES-3", patient_id="PAT-OLD", collected_date=date(2012, 1, 1)),
+        ],
+    )
+
+    rows = inactive_patients(db, as_of=date(2026, 10, 30), years=10)
+
+    assert [r["patient_id"] for r in rows] == ["PAT-OLD", "PAT-EXACT"]  # oldest first, 10 years exactly counts
+    assert inactive_patients(db, as_of=date(2026, 10, 30), years=15) == []
+
+
+def test_a_database_made_before_the_inactivity_column_gets_it_and_is_filled_in(db_path):
+    old = sqlite3.connect(db_path)
+    old.executescript(
+        "CREATE TABLE patients (patient_id TEXT PRIMARY KEY, display_name TEXT, "
+        "  birth_date TEXT, sex TEXT) STRICT;"
+        "CREATE TABLE results (result_id TEXT PRIMARY KEY, patient_id TEXT NOT NULL, "
+        "  test_code TEXT NOT NULL, value REAL, unit TEXT NOT NULL, collected_date TEXT NOT NULL, "
+        "  reported_date TEXT NOT NULL, order_id TEXT) STRICT;"
+        "INSERT INTO patients (patient_id) VALUES ('PAT-A');"
+        "INSERT INTO results VALUES ('RES-1', 'PAT-A', 'GLU', 85, 'mg/dL', '2015-05-05', '2015-05-06', NULL);"
+    )
+    old.close()
+
+    conn = connect(db_path)
+    try:
+        row = conn.execute("SELECT last_result_date FROM patients WHERE patient_id = 'PAT-A'").fetchone()
+        assert row[0] == "2015-05-05"
+        connect(db_path).close()  # a second open must not try to add the column again
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------
