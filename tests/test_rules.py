@@ -26,6 +26,7 @@ from lab_intake.rules import (
     RuleContext,
     SexNotApplicableRule,
     Under18Rule,
+    UnexpectedUnitRule,
     default_rules,
 )
 
@@ -221,6 +222,88 @@ def test_missing_value_is_quiet_when_a_number_was_reported(settings):
 
 
 # --------------------------------------------------------------------------
+# UnexpectedUnitRule
+# --------------------------------------------------------------------------
+
+def test_unexpected_unit_is_quiet_when_the_unit_matches(settings):
+    """An exact match with the settings unit is not a flag. The number stays as sent."""
+    glucose = fire(UnexpectedUnitRule(), settings, [make_result(85.0, unit="mg/dL")])
+    potassium = fire(UnexpectedUnitRule(), settings, [make_result(4.2, test_code="K", unit="mmol/L")])
+
+    assert glucose == []
+    assert potassium == []
+
+
+def test_unexpected_unit_flags_a_unit_that_does_not_match(settings):
+    """mg/dl is not mg/dL. The message names both units and does not read the number."""
+    flags = fire(UnexpectedUnitRule(), settings, [make_result(85.0, unit="mmol/L")])
+
+    assert len(flags) == 1
+    assert flags[0].rule_code == "UNEXPECTED_UNIT"
+    assert flags[0].severity == "high"
+    assert flags[0].message == "Unit mmol/L does not match the settings unit mg/dL."
+    assert flags[0].details == {"sent_unit": "mmol/L", "expected_unit": "mg/dL"}
+    assert "85" not in flags[0].message
+
+    case_flags = fire(UnexpectedUnitRule(), settings, [make_result(85.0, unit="mg/dl")])
+    assert len(case_flags) == 1
+    assert case_flags[0].message == "Unit mg/dl does not match the settings unit mg/dL."
+    assert case_flags[0].details == {"sent_unit": "mg/dl", "expected_unit": "mg/dL"}
+
+
+def test_unexpected_unit_flags_a_blank_unit(settings):
+    glucose = fire(UnexpectedUnitRule(), settings, [make_result(85.0, unit="")])
+    potassium = fire(UnexpectedUnitRule(), settings, [make_result(4.2, test_code="K", unit="")])
+
+    assert len(glucose) == 1
+    assert glucose[0].rule_code == "UNEXPECTED_UNIT"
+    assert glucose[0].severity == "high"
+    assert glucose[0].message == (
+        "No unit was reported. Settings unit for Glucose, Fasting is mg/dL."
+    )
+    assert glucose[0].details == {"sent_unit": "", "expected_unit": "mg/dL"}
+    assert "85" not in glucose[0].message
+
+    assert potassium[0].message == (
+        "No unit was reported. Settings unit for Potassium is mmol/L."
+    )
+    assert potassium[0].details == {"sent_unit": "", "expected_unit": "mmol/L"}
+
+
+def test_unexpected_unit_stays_quiet_when_the_value_is_missing(settings):
+    """PENDING, blank, and NA arrive as no number. The unit is not also flagged."""
+    assert fire(UnexpectedUnitRule(), settings, [make_result(None, unit="")]) == []
+    assert fire(UnexpectedUnitRule(), settings, [make_result(None, unit="mmol/L")]) == []
+    assert fire(UnexpectedUnitRule(), settings, [make_result(None)]) == []
+
+
+def test_unexpected_unit_still_fires_when_another_rule_owns_the_result():
+    """Under 18 and female PSA are not scored, and the unit is still checked."""
+    from pathlib import Path
+
+    from lab_intake.settings import load_settings
+
+    clinic = load_settings(Path(__file__).resolve().parents[1] / "config" / "settings.json")
+    collected = date(2026, 3, 1)
+
+    child = _patient("2010-03-01")
+    glucose = [make_result(40.0, unit="mmol/L", collected_date=collected)]
+    assert [f.rule_code for f in fire(UnexpectedUnitRule(), clinic, glucose, patients=child)] == [
+        "UNEXPECTED_UNIT"
+    ]
+    assert [f.rule_code for f in fire(Under18Rule(), clinic, glucose, patients=child)] == [
+        "UNDER_18"
+    ]
+    assert fire(OutOfRangeRule(), clinic, glucose, patients=child) == []
+
+    female = _patient("1980-01-01", sex="F")
+    psa = [make_result(1.2, test_code="PSA", unit="mg/dL", collected_date=collected)]
+    assert len(fire(UnexpectedUnitRule(), clinic, psa, patients=female)) == 1
+    assert len(fire(SexNotApplicableRule(), clinic, psa, patients=female)) == 1
+    assert fire(OutOfRangeRule(), clinic, psa, patients=female) == []
+
+
+# --------------------------------------------------------------------------
 # MissingResultRule
 # --------------------------------------------------------------------------
 
@@ -411,6 +494,7 @@ def test_the_release_rules_are_registered():
         "SEX_NOT_APPLICABLE",
         "MISSING_VALUE",
         "MISSING_RESULT",
+        "UNEXPECTED_UNIT",
     }
 
 

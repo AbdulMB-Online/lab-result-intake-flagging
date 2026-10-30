@@ -16,6 +16,7 @@ the tool has to handle, so there is always something to show:
   PSA for a female patient    an error, not checked against a male band
   sex X, sex-specific test    no matching male or female band
   missing value               a result that came back PENDING, with no number
+  unexpected unit             glucose 85 mmol/L, and potassium 4.2 with no unit
   ordered test, no result     an order with no matching result line
   inactive 10+ years          two patients whose last order and result are older
   bad rows                    one per rejection reason the loader can give
@@ -441,6 +442,43 @@ def build(settings: Settings, seed: int, patient_count: int, today: date) -> Bui
             reported=collected + timedelta(days=1),
             order_id=order_id,
         )
+
+    # ------------------------------------------------------------------
+    # 7. unexpected unit, and only that
+    #
+    # Both numbers sit inside the adult normal range, so neither is out of
+    # range or borderline. Each names the order it answers and was collected
+    # in the last few weeks, so neither is a missing result or an inactive
+    # patient. Dates are fixed and do not draw on the random stream.
+    # Glucose 85 mmol/L is inside 70-99. Potassium 4.2 with a blank unit is
+    # inside 3.5-5.0. The 16.4 mg/dL potassium case is left to the engine
+    # test: that number is also out of range.
+    # ------------------------------------------------------------------
+    glu_patient = patient_ids[0]
+    glu_collected = today - timedelta(days=9)
+    glu_order = b.add_order(glu_patient, "GLU", glu_collected - timedelta(days=1))
+    b.add_result(
+        glu_patient,
+        "GLU",
+        "85",
+        "mmol/L",
+        glu_collected,
+        reported=glu_collected + timedelta(days=1),
+        order_id=glu_order,
+    )
+
+    k_patient = patient_ids[3]
+    k_collected = today - timedelta(days=12)
+    k_order = b.add_order(k_patient, "K", k_collected - timedelta(days=1))
+    b.add_result(
+        k_patient,
+        "K",
+        "4.2",
+        "",
+        k_collected,
+        reported=k_collected + timedelta(days=1),
+        order_id=k_order,
+    )
 
     # Shuffle so the bad rows are not all at the bottom.
     b.rng.shuffle(b.results)
