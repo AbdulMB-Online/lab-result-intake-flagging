@@ -99,6 +99,60 @@ def test_report_shows_a_stored_run_again_without_the_input_files(
     assert capsys.readouterr().out == again
 
 
+def test_email_to_sends_the_printed_report(
+    tmp_path, settings_path, db_path, write_results, write_orders, capsys, monkeypatch
+):
+    from test_mailer import FakeSMTP
+    from lab_intake import mailer
+
+    FakeSMTP.instances, FakeSMTP.fail_with = [], None
+    monkeypatch.setattr(mailer.smtplib, "SMTP", FakeSMTP)
+    env_file = tmp_path / "mail.env"
+    env_file.write_text("LAB_SMTP_HOST=mail.test\nLAB_MAIL_FROM=lab@clinic.test\nLAB_SMTP_STARTTLS=0\n")
+    results = write_results([row(result_id="RES-LOW", value="64")])
+    orders = write_orders([])
+    patients = write_patients(tmp_path, [["PAT-0001", "Avery Bennett", "1970-01-01", "F"]])
+
+    code = main(
+        [
+            "--db", str(db_path), "--settings", str(settings_path), "--env-file", str(env_file),
+            "run", "--results", str(results), "--orders", str(orders), "--patients", str(patients),
+            "--email-to", "nurse@clinic.test",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    (message,) = FakeSMTP.instances[0].sent
+    assert message["Subject"] == "Lab result check 1: 1 flags"
+    assert message.get_content() in out  # the email is the printed report, nothing more
+    assert "Report emailed to nurse@clinic.test" in out
+
+
+def test_a_mail_problem_is_a_warning_and_the_report_still_prints(
+    tmp_path, settings_path, db_path, write_results, write_orders, capsys, monkeypatch
+):
+    for name in ("LAB_SMTP_HOST", "LAB_MAIL_FROM"):
+        monkeypatch.delenv(name, raising=False)  # nothing configured, whatever the shell has
+    results = write_results([row(result_id="RES-LOW", value="64")])
+    orders = write_orders([])
+    patients = write_patients(tmp_path, [["PAT-0001", "Avery Bennett", "1970-01-01", "F"]])
+
+    code = main(
+        [
+            "--db", str(db_path), "--settings", str(settings_path),
+            "--env-file", str(tmp_path / "no-such.env"),  # so no SMTP host is configured
+            "run", "--results", str(results), "--orders", str(orders), "--patients", str(patients),
+            "--email-to", "nurse@clinic.test",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "OUT_OF_RANGE (1)" in captured.out
+    assert "warning: report printed but not emailed" in captured.err
+
+
 def test_report_for_a_run_that_does_not_exist_is_an_error(settings_path, db_path, capsys):
     code = main(["--db", str(db_path), "--settings", str(settings_path), "report", "--run", "7"])
 

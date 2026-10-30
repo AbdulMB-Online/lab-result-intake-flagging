@@ -3,7 +3,7 @@
     python -m lab_intake run --results data/results.csv --orders data/orders.csv \
         --patients data/patients.csv
     python -m lab_intake report
-    python -m lab_intake report --run 3
+    python -m lab_intake report --run 3 --email-to nurse@clinic.example
     python -m lab_intake history PAT-0003 GLU
     python -m lab_intake inactive --years 10
 
@@ -27,6 +27,7 @@ from pathlib import Path
 from .backup import BackupError, backup_database, restore_database
 from .engine import intake
 from .loader import FileFormatError
+from .mailer import MailError, MailSettings, load_env_file, send_report
 from .report import render_history, render_report
 from .settings import Settings, SettingsError, load_settings
 from .storage import (
@@ -43,6 +44,7 @@ from .storage import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = REPO_ROOT / "lab_intake.db"
 DEFAULT_SETTINGS_PATH = REPO_ROOT / "config" / "settings.json"
+DEFAULT_ENV_FILE = REPO_ROOT / ".env"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("LAB_SETTINGS_PATH", str(DEFAULT_SETTINGS_PATH)),
         help="reference range settings file (default: $LAB_SETTINGS_PATH, then config/settings.json)",
     )
+    parser.add_argument(
+        "--env-file",
+        default=str(DEFAULT_ENV_FILE),
+        help="file of LAB_SMTP_* mail settings, read if it exists (default: .env in the repo)",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     run = commands.add_parser("run", help="check a result file and print the report")
@@ -70,10 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="patient details file (CSV); sex and birth date pick each result's range",
     )
+    run.add_argument("--email-to", help="also email the report to this address")
     run.set_defaults(func=run_command)
 
     report = commands.add_parser("report", help="show a stored report again without re-running")
     report.add_argument("--run", type=int, help="check run number (default: the latest)")
+    report.add_argument("--email-to", help="also email the report to this address")
     report.set_defaults(func=report_command)
 
     hist = commands.add_parser("history", help="show one patient's results for one test")
@@ -135,7 +144,10 @@ def run_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.Conn
         f"Check run {check_run_id} recorded {len(run.flags)} flags "
         f"and {len(run.rejected)} rejected rows.\n"
     )
-    print(render_report(load_check(conn, check_run_id), settings), end="")
+    check = load_check(conn, check_run_id)
+    text = render_report(check, settings)
+    print(text, end="")
+    email_report(args, check, text)
     return 0
 
 
@@ -145,8 +157,28 @@ def report_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.C
     if check is None and args.run is not None:
         print(f"error: no check run {args.run} in the database", file=sys.stderr)
         return 1
-    print(render_report(check, settings), end="")
+    text = render_report(check, settings)
+    print(text, end="")
+    email_report(args, check, text)
     return 0
+
+
+def email_report(args: argparse.Namespace, check, text: str) -> None:
+    """Send the printed report if --email-to was given. Failure is a warning, not an exit.
+
+    The printed copy is the record; the email is a convenience. A mail
+    problem must never make a run look like it failed.
+    """
+    if not args.email_to or check is None:
+        return
+    load_env_file(args.env_file)
+    subject = f"Lab result check {check.run['check_run_id']}: {len(check.flags)} flags"
+    try:
+        send_report(args.email_to, subject, text, MailSettings.from_env())
+    except MailError as exc:
+        print(f"warning: report printed but not emailed: {exc}", file=sys.stderr)
+    else:
+        print(f"Report emailed to {args.email_to}")
 
 
 def history_command(args: argparse.Namespace, settings: Settings, conn: sqlite3.Connection) -> int:
