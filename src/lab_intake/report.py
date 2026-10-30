@@ -22,6 +22,21 @@ CLINICIAN_DECIDES = (
     "It does not interpret them. The clinician decides."
 )
 
+# Column headings, spaced to match _flag_line and the rejected-row lines.
+FLAG_COLUMNS = f"  {'PATIENT':<10} {'TEST':<5} {'VALUE SENT':>16}  {'RANGE APPLIED':<28} WHAT CROSSED WHAT"
+REJECT_COLUMNS = f"  {'LINE':<10} {'RECORD ID':<14} {'REASON CODE':<26} DETAIL"
+
+
+def _when(run_at: str) -> str:
+    """2026-10-30T18:33:53+00:00 as '2026-10-30 18:33 UTC'; anything else as stored."""
+    if len(run_at) >= 16 and run_at[10] == "T" and run_at.endswith("+00:00"):
+        return f"{run_at[:10]} {run_at[11:16]} UTC"
+    return run_at
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
 
 def render_report(check: SavedCheck | None, settings: Settings) -> str:
     """The flagged-results report for one stored check run."""
@@ -30,15 +45,21 @@ def render_report(check: SavedCheck | None, settings: Settings) -> str:
 
     run = check.run
     lines = [
-        f"Lab result check {run['check_run_id']} at {run['run_at']} "
-        f"(release {run['release']}, settings {run['settings_version']})",
+        "FLAGGED RESULTS REPORT",
+        f"Check run {run['check_run_id']}, {_when(run['run_at'])}. "
+        f"Release {run['release']}, settings {run['settings_version']}.",
         f"Results file: {run['results_file'] or '-'}",
         f"Orders file:  {run['orders_file'] or '-'}",
+        "",
+        f"{_count(len(check.flags), 'flag')}, {_count(len(check.rejected), 'rejected row')}",
         "",
     ]
 
     if not check.flags:
         lines.append("No flags. Every result was in range and every ordered test came back.")
+        lines.append("")
+    else:
+        lines.append(FLAG_COLUMNS)
     for rule_code, group in _grouped_by_rule(check.flags):
         flags = list(group)
         lines.append(f"{rule_code} ({len(flags)}) - severity {flags[0]['severity']}")
@@ -48,6 +69,7 @@ def render_report(check: SavedCheck | None, settings: Settings) -> str:
 
     if check.rejected:
         lines.append(f"Rejected rows ({len(check.rejected)}) - never checked, never stored")
+        lines.append(REJECT_COLUMNS)
         for reject in check.rejected:
             lines.append(
                 f"  line {reject['source_line']:<5} {reject['record_id']:<14} "

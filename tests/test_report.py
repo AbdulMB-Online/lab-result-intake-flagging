@@ -51,7 +51,15 @@ def test_report_groups_flags_by_rule_with_patient_test_value_unit_and_range(
 
     text = render_report(latest_check(db), settings)
 
-    assert "Lab result check 1 at 2026-03-03T09:00:00+00:00 (release 1.0.0" in text
+    assert text.startswith("FLAGGED RESULTS REPORT\n")
+    assert "Check run 1, 2026-03-03 09:00 UTC. Release 1.0.0, settings ." in text
+    assert "4 flags, 0 rejected rows" in text
+    # Column headings sit above the first group and line up with the columns.
+    heading = next(line for line in text.splitlines() if line.lstrip().startswith("PATIENT"))
+    first_flag = next(line for line in text.splitlines() if line.lstrip().startswith("PAT-"))
+    assert heading.index("PATIENT") == first_flag.index("PAT-")
+    assert heading.index("TEST") == first_flag.index(first_flag.split()[1])
+    assert heading.index("RANGE APPLIED") == first_flag.index("range ")
     # Groups are headed by rule, serious ones first.
     assert text.index("MISSING_RESULT (1)") < text.index("OUT_OF_RANGE (2)") < text.index("BORDERLINE (1)")
     # Each line carries patient, test, the lab's value and unit, and the settings' range.
@@ -86,7 +94,12 @@ def test_report_lists_rejected_rows_with_their_reason(settings, db, write_result
 
     text = render_report(latest_check(db), settings)
 
+    assert "0 flags, 1 rejected row" in text  # the good row is normal; singular when it is one
     assert "Rejected rows (1)" in text
+    heading = next(line for line in text.splitlines() if line.lstrip().startswith("LINE"))
+    reject_line = next(line for line in text.splitlines() if line.lstrip().startswith("line "))
+    assert heading.index("RECORD ID") == reject_line.index("RES-BAD")
+    assert heading.index("REASON CODE") == reject_line.index("VALUE_NOT_NUMERIC")
     assert "RES-BAD" in text
     assert "VALUE_NOT_NUMERIC" in text
     assert "value 'ninety' is not a number" in text
