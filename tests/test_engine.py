@@ -33,13 +33,12 @@ def test_a_file_with_no_problems_produces_no_flags(settings, write_results, writ
 
 
 def test_no_result_can_carry_two_flags(settings):
-    """With the 1.0.0 rules, one result never breaks more than one.
+    """A matching unit leaves each of these results with at most one flag.
 
     Out of range and borderline are mutually exclusive, a value on a normal
-    limit is not flagged, a blank value is only MISSING_VALUE, and missing
-    result is about an order rather than a result. The 1.1.0 unit rule can
-    fire beside out of range, and this test is the one to revisit when that
-    rule arrives.
+    limit is not flagged, and a blank value is only MISSING_VALUE. A wrong
+    unit can fire beside out of range: potassium 16.4 mg/dL is past the
+    high cut and is not the settings unit.
     """
     results = [
         make_result(64.0, result_id="RES-LOW"),      # beyond the low cut
@@ -53,6 +52,13 @@ def test_no_result_can_carry_two_flags(settings):
 
     per_result = Counter(f.result_id for f in flags)
     assert per_result and max(per_result.values()) == 1
+
+    wrong_unit = make_result(16.4, test_code="K", unit="mg/dL", result_id="RES-K-UNIT")
+    both = run_rules(
+        RuleContext.build(settings, results=[wrong_unit], patients=DEMO_PATIENTS)
+    )
+    assert sorted(f.rule_code for f in both) == ["OUT_OF_RANGE", "UNEXPECTED_UNIT"]
+    assert {f.result_id for f in both} == {"RES-K-UNIT"}
 
 
 def test_a_borderline_result_is_not_also_out_of_range(settings):

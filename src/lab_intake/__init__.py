@@ -22,6 +22,7 @@ from .rules import (
     RuleContext,
     SexNotApplicableRule,
     Under18Rule,
+    UnexpectedUnitRule,
     default_rules,
 )
 from .report import render_history, render_report  # noqa: E402
@@ -68,6 +69,7 @@ __all__ = [
     "SettingsError",
     "TestSpec",
     "Under18Rule",
+    "UnexpectedUnitRule",
     "__version__",
     "connect",
     "default_rules",

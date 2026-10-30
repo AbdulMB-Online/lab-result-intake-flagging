@@ -107,6 +107,7 @@ def test_generated_files_produce_a_report_and_persistent_patient_history(tmp_pat
             "NO_REFERENCE_RANGE": 1,
             "UNDER_18": 1,
             "SEX_NOT_APPLICABLE": 1,
+            "UNEXPECTED_UNIT": 2,
         }
         assert {row["check_run_id"] for row in rejected} == {runs[0]["check_run_id"]}
         assert conn.execute(

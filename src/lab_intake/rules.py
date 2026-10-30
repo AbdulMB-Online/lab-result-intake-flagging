@@ -430,6 +430,44 @@ def _order_was_returned(order: OrderedTest, results: tuple[LabResult, ...]) -> b
     return False
 
 
+class UnexpectedUnitRule(ResultRule):
+    """A number came back with no unit, or in a unit other than the settings unit.
+
+    The stored unit is compared with TestSpec.unit by exact string match.
+    mg/dl is not mg/dL. The number is not converted, and no other spelling is
+    accepted. A row with no number is left to MissingValueRule. This check
+    does not turn off the range rules: a patient under 18, or a sex the test
+    rejects, can still carry this flag beside the flag they already have.
+    """
+
+    code = "UNEXPECTED_UNIT"
+    description = "Result unit is blank or does not match the settings unit"
+    severity = "high"
+
+    def check(self, result: LabResult, context: RuleContext) -> Flag | None:
+        if not result.has_value:
+            return None
+        spec = context.settings.spec(result.test_code)
+        if spec is None:
+            return None
+        sent = result.unit
+        expected = spec.unit
+        if sent == expected:
+            return None
+        if sent:
+            message = f"Unit {sent} does not match the settings unit {expected}."
+        else:
+            message = (
+                f"No unit was reported. Settings unit for {spec.name} is {expected}."
+            )
+        return self._flag(
+            result,
+            message,
+            sent_unit=sent,
+            expected_unit=expected,
+        )
+
+
 #: Every rule the tool knows about, in the order they run.
 RULES: tuple[type[ResultRule], ...] = (
     OutOfRangeRule,
@@ -439,6 +477,7 @@ RULES: tuple[type[ResultRule], ...] = (
     SexNotApplicableRule,
     MissingValueRule,
     MissingResultRule,
+    UnexpectedUnitRule,
 )
 
 

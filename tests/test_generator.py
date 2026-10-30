@@ -85,6 +85,7 @@ def test_generated_file_contains_every_flag_case(run):
         "NO_REFERENCE_RANGE",
         "UNDER_18",
         "SEX_NOT_APPLICABLE",
+        "UNEXPECTED_UNIT",
     }
 
 
