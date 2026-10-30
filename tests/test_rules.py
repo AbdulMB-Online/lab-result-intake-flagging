@@ -1,10 +1,11 @@
-"""Each rule on its own, including the boundary cases the team agreed on.
+"""Each rule on its own, including the boundary cases the clinic asked for.
 
-GLU in the test settings is 70.0-99.0 mg/dL with borderline_pct 0.05, so:
-    span          29.0
-    band          1.45
-    borderline    70.00 - 71.45  and  97.55 - 99.00
-    out of range  below 70.00    and  above 99.00
+GLU in the test settings:
+    low                value < 65
+    borderline low     65 <= value < 70
+    normal             70 <= value <= 99, including the limits
+    borderline high    99 < value < 120
+    high               value >= 120
 """
 
 from __future__ import annotations
@@ -13,33 +14,41 @@ from datetime import date
 
 import pytest
 
-from conftest import make_order, make_result
+from conftest import DEMO_PATIENTS, make_order, make_result
 from lab_intake.rules import (
     RULES,
     BorderlineRule,
     MissingResultRule,
     MissingValueRule,
+    NoReferenceRangeRule,
     OutOfRangeRule,
     ResultRule,
     RuleContext,
+    SexNotApplicableRule,
+    Under18Rule,
     default_rules,
 )
 
 
-def ctx(settings, results=(), orders=()):
-    return RuleContext.build(settings, results=results, orders=orders)
+def ctx(settings, results=(), orders=(), patients=None):
+    return RuleContext.build(
+        settings,
+        results=results,
+        orders=orders,
+        patients=DEMO_PATIENTS if patients is None else patients,
+    )
 
 
-def fire(rule, settings, results=(), orders=()):
-    return list(rule.evaluate(ctx(settings, results, orders)))
+def fire(rule, settings, results=(), orders=(), patients=None):
+    return list(rule.evaluate(ctx(settings, results, orders, patients)))
 
 
 # --------------------------------------------------------------------------
 # OutOfRangeRule
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("value", [69.9, 60.0, 0.0, 99.1, 140.0])
-def test_out_of_range_flags_values_outside_the_limits(settings, value):
+@pytest.mark.parametrize("value", [64.0, 50.0, 0.0, 120.0, 140.0])
+def test_out_of_range_flags_values_beyond_the_outer_cuts(settings, value):
     flags = fire(OutOfRangeRule(), settings, [make_result(value)])
 
     assert len(flags) == 1
@@ -49,23 +58,24 @@ def test_out_of_range_flags_values_outside_the_limits(settings, value):
     assert flags[0].patient_id == "PAT-0001"
 
 
-@pytest.mark.parametrize("value", [70.0, 85.0, 99.0, 71.45, 97.55])
-def test_out_of_range_is_quiet_inside_the_limits(settings, value):
+@pytest.mark.parametrize("value", [65.0, 70.0, 85.0, 99.0, 110.0, 119.0])
+def test_out_of_range_is_quiet_inside_and_in_the_borderline_band(settings, value):
     assert fire(OutOfRangeRule(), settings, [make_result(value)]) == []
 
 
 def test_out_of_range_records_direction_and_distance(settings):
     low_flag = fire(OutOfRangeRule(), settings, [make_result(64.0)])[0]
-    high_flag = fire(OutOfRangeRule(), settings, [make_result(110.0)])[0]
+    high_flag = fire(OutOfRangeRule(), settings, [make_result(130.0)])[0]
 
     assert low_flag.details["direction"] == "below"
-    assert low_flag.details["limit"] == 70.0
-    assert low_flag.details["distance"] == pytest.approx(6.0)
-    assert "below the reference range 70-99 mg/dL" in low_flag.message
+    assert low_flag.details["limit"] == 65.0
+    assert low_flag.details["distance"] == pytest.approx(1.0)
+    assert "below 65 mg/dL" in low_flag.message
 
     assert high_flag.details["direction"] == "above"
-    assert high_flag.details["limit"] == 99.0
-    assert high_flag.details["distance"] == pytest.approx(11.0)
+    assert high_flag.details["limit"] == 120.0
+    assert high_flag.details["distance"] == pytest.approx(10.0)
+    assert "above 120 mg/dL" in high_flag.message
 
 
 def test_out_of_range_skips_a_result_with_no_value(settings):
@@ -86,8 +96,8 @@ def test_out_of_range_uses_each_tests_own_range(settings):
 # BorderlineRule
 # --------------------------------------------------------------------------
 
-@pytest.mark.parametrize("value", [70.5, 71.0, 71.45, 97.55, 98.0, 98.9])
-def test_borderline_flags_values_near_a_limit(settings, value):
+@pytest.mark.parametrize("value", [65.0, 69.0, 100.0, 110.0, 119.0])
+def test_borderline_flags_the_band_outside_the_normal_range(settings, value):
     flags = fire(BorderlineRule(), settings, [make_result(value)])
 
     assert len(flags) == 1
@@ -95,44 +105,69 @@ def test_borderline_flags_values_near_a_limit(settings, value):
     assert flags[0].severity == "medium"
 
 
-@pytest.mark.parametrize("value", [71.46, 80.0, 85.0, 97.54])
-def test_borderline_is_quiet_in_the_middle_of_the_range(settings, value):
+@pytest.mark.parametrize("value", [70.0, 80.0, 85.0, 99.0])
+def test_borderline_is_quiet_inside_the_normal_range(settings, value):
     assert fire(BorderlineRule(), settings, [make_result(value)]) == []
 
 
-@pytest.mark.parametrize("value", [69.9, 99.1, 120.0])
-def test_borderline_is_quiet_outside_the_range(settings, value):
-    """Out of range is out of range; OutOfRangeRule owns those."""
+@pytest.mark.parametrize("value", [64.0, 120.0, 140.0])
+def test_borderline_is_quiet_beyond_the_outer_cuts(settings, value):
+    """Beyond the outer cut is out of range; OutOfRangeRule owns those."""
     assert fire(BorderlineRule(), settings, [make_result(value)]) == []
 
 
-@pytest.mark.parametrize("value, side", [(70.0, "low"), (99.0, "high")])
-def test_a_value_exactly_at_a_limit_is_in_range_and_borderline(settings, value, side):
-    """The team's decision: limits are inclusive, and sitting on one is borderline."""
+@pytest.mark.parametrize("value", [70.0, 99.0])
+def test_a_value_on_a_normal_limit_is_normal(settings, value):
+    """Sitting on a normal limit is normal. It is not borderline."""
     results = [make_result(value)]
 
     assert fire(OutOfRangeRule(), settings, results) == []
+    assert fire(BorderlineRule(), settings, results) == []
 
-    borderline = fire(BorderlineRule(), settings, results)
+
+def test_the_low_outer_cut_is_borderline_and_the_high_gte_cut_is_out_of_range(settings):
+    """65 is the first borderline-low value. 120 is already high, because high_gte includes it."""
+    low = fire(BorderlineRule(), settings, [make_result(65.0)])
+    assert len(low) == 1
+    assert low[0].details["side"] == "low"
+    assert low[0].details["outer"] == 65.0
+    assert low[0].details["at_outer_cut"] is True
+    assert fire(OutOfRangeRule(), settings, [make_result(65.0)]) == []
+
+    high = fire(OutOfRangeRule(), settings, [make_result(120.0)])
+    assert len(high) == 1
+    assert "at or above 120 mg/dL" in high[0].message
+    assert fire(BorderlineRule(), settings, [make_result(120.0)]) == []
+
+
+def test_an_inclusive_high_borderline_cut_stays_borderline(settings):
+    """Potassium's high cut is high_gt, so 5.3 is still borderline and 5.4 is high."""
+    on_cut = make_result(5.3, test_code="K")
+    borderline = fire(BorderlineRule(), settings, [on_cut])
     assert len(borderline) == 1
-    assert borderline[0].details["side"] == side
-    assert borderline[0].details["at_limit"] is True
-    assert borderline[0].details["limit"] == value
-    assert "exactly at the" in borderline[0].message
+    assert borderline[0].details["side"] == "high"
+    assert borderline[0].details["at_outer_cut"] is True
+    assert fire(OutOfRangeRule(), settings, [on_cut]) == []
+
+    above = make_result(5.4, test_code="K")
+    assert fire(BorderlineRule(), settings, [above]) == []
+    assert len(fire(OutOfRangeRule(), settings, [above])) == 1
 
 
-def test_borderline_band_comes_from_the_settings(settings):
-    flag = fire(BorderlineRule(), settings, [make_result(71.0)])[0]
-    assert flag.details["band"] == pytest.approx(1.45)
+def test_borderline_cuts_come_from_the_settings(settings):
+    flag = fire(BorderlineRule(), settings, [make_result(66.0)])[0]
     assert flag.details["side"] == "low"
+    assert flag.details["outer"] == 65.0
+    assert "below the normal range 70-99 mg/dL" in flag.message
 
 
-def test_borderline_band_is_per_test_not_a_fixed_number(settings):
-    """K spans 1.6, so its band is 0.08 — not glucose's 1.45."""
-    flag = fire(BorderlineRule(), settings, [make_result(3.55, test_code="K")])[0]
-    assert flag.details["band"] == pytest.approx(0.08)
+def test_borderline_bands_are_per_test(settings):
+    """Potassium's low band is 3.0 up to but not including 3.5, not glucose's 65-70."""
+    flag = fire(BorderlineRule(), settings, [make_result(3.2, test_code="K")])[0]
+    assert flag.details["side"] == "low"
+    assert flag.details["outer"] == 3.0
 
-    assert fire(BorderlineRule(), settings, [make_result(3.7, test_code="K")]) == []
+    assert fire(BorderlineRule(), settings, [make_result(4.0, test_code="K")]) == []
 
 
 def test_borderline_skips_a_result_with_no_value(settings):
@@ -140,11 +175,12 @@ def test_borderline_skips_a_result_with_no_value(settings):
 
 
 def test_borderline_quotes_the_unit_the_lab_sent(settings):
-    """The value wears the lab's unit. The limit wears the settings unit."""
-    flag = fire(BorderlineRule(), settings, [make_result(98.0, unit="mmol/L")])[0]
+    """The value wears the lab's unit. The cuts wear the settings unit."""
+    flag = fire(BorderlineRule(), settings, [make_result(110.0, unit="mmol/L")])[0]
 
-    assert flag.message.startswith("98 mmol/L is in range")
-    assert "99 mg/dL" in flag.message
+    assert flag.message.startswith("110 mmol/L is above the normal range")
+    assert "70-99 mg/dL" in flag.message
+    assert "120 mg/dL" in flag.message
     assert flag.details["sent_unit"] == "mmol/L"
     assert flag.details["unit"] == "mg/dL"
 
@@ -153,7 +189,7 @@ def test_out_of_range_quotes_the_unit_the_lab_sent(settings):
     flag = fire(OutOfRangeRule(), settings, [make_result(16.4, test_code="K", unit="mg/dL")])[0]
 
     assert flag.message.startswith("16.4 mg/dL is above")
-    assert "3.5-5.1 mmol/L" in flag.message
+    assert "5.3 mmol/L" in flag.message
     assert flag.details["sent_unit"] == "mg/dL"
     assert flag.details["unit"] == "mmol/L"
 
@@ -161,7 +197,7 @@ def test_out_of_range_quotes_the_unit_the_lab_sent(settings):
 def test_out_of_range_with_no_unit_does_not_invent_one(settings):
     flag = fire(OutOfRangeRule(), settings, [make_result(64.0, unit="")])[0]
 
-    assert flag.message.startswith("64 is below the reference range 70-99 mg/dL")
+    assert flag.message.startswith("64 is below 65 mg/dL")
 
 
 # --------------------------------------------------------------------------
@@ -285,14 +321,94 @@ def test_a_result_collected_before_the_order_does_not_count(settings):
     assert [f.order_id for f in flags] == ["ORD-LATE"]
 
 
+def _patient(birth: str, sex: str = "F", patient_id: str = "PAT-0001") -> list[dict]:
+    return [{
+        "patient_id": patient_id,
+        "display_name": "",
+        "sex": sex,
+        "birth_date": birth,
+    }]
+
+
+def test_a_patient_under_18_is_not_scored_against_the_range(settings):
+    """Age 18 is an adult. The day before that birthday is still under 18."""
+    child = _patient("2008-03-02")
+    adult = _patient("2008-03-01")
+    low = [make_result(64.0)]
+
+    flags = fire(Under18Rule(), settings, low, patients=child)
+    assert len(flags) == 1
+    assert "under 18" in flags[0].message
+    assert flags[0].details["age"] == 17
+    assert fire(OutOfRangeRule(), settings, low, patients=child) == []
+    assert fire(BorderlineRule(), settings, low, patients=child) == []
+    assert fire(NoReferenceRangeRule(), settings, low, patients=child) == []
+
+    assert fire(Under18Rule(), settings, low, patients=adult) == []
+    assert len(fire(OutOfRangeRule(), settings, low, patients=adult)) == 1
+
+
+def test_a_value_with_no_matching_band_is_not_called_out_of_range(settings):
+    results = [make_result(64.0)]
+
+    assert fire(OutOfRangeRule(), settings, results, patients=[]) == []
+    flags = fire(NoReferenceRangeRule(), settings, results, patients=[])
+
+    assert len(flags) == 1
+    assert "not compared with a range" in flags[0].message
+
+
+def test_clinic_rules_for_children_sex_x_and_female_psa():
+    """The shipped settings: under 18, sex X, and female PSA each get their own flag."""
+    from pathlib import Path
+
+    from lab_intake.settings import load_settings
+
+    clinic = load_settings(Path(__file__).resolve().parents[1] / "config" / "settings.json")
+    collected = date(2026, 3, 1)
+
+    child = _patient("2010-03-01")
+    glucose = [make_result(40.0, collected_date=collected)]
+    assert [f.rule_code for f in fire(Under18Rule(), clinic, glucose, patients=child)] == ["UNDER_18"]
+    assert fire(OutOfRangeRule(), clinic, glucose, patients=child) == []
+    assert "under 18" in fire(Under18Rule(), clinic, glucose, patients=child)[0].message
+
+    sex_x = _patient("1980-01-01", sex="X")
+    hemoglobin = [make_result(14.0, test_code="HGB", unit="g/dL")]
+    assert fire(OutOfRangeRule(), clinic, hemoglobin, patients=sex_x) == []
+    assert fire(SexNotApplicableRule(), clinic, hemoglobin, patients=sex_x) == []
+    unmatched = fire(NoReferenceRangeRule(), clinic, hemoglobin, patients=sex_x)
+    assert len(unmatched) == 1
+    assert "sex X" in unmatched[0].message
+
+    female = _patient("1980-01-01", sex="F")
+    psa = [make_result(1.2, test_code="PSA", unit="ng/mL")]
+    error = fire(SexNotApplicableRule(), clinic, psa, patients=female)
+    assert len(error) == 1
+    assert "female" in error[0].message
+    assert "error" in error[0].message
+    assert "no range" not in error[0].message.lower()
+    assert "no matching" not in error[0].message.lower()
+    assert fire(NoReferenceRangeRule(), clinic, psa, patients=female) == []
+    assert fire(OutOfRangeRule(), clinic, psa, patients=female) == []
+
+    male = _patient("1980-01-01", sex="M")
+    assert fire(SexNotApplicableRule(), clinic, psa, patients=male) == []
+    assert fire(OutOfRangeRule(), clinic, psa, patients=male) == []
+    assert fire(BorderlineRule(), clinic, psa, patients=male) == []
+
+
 # --------------------------------------------------------------------------
 # the rule registry and the base class
 # --------------------------------------------------------------------------
 
 def test_the_release_rules_are_registered():
     assert {cls.code for cls in RULES} == {
+        "NO_REFERENCE_RANGE",
         "OUT_OF_RANGE",
         "BORDERLINE",
+        "UNDER_18",
+        "SEX_NOT_APPLICABLE",
         "MISSING_VALUE",
         "MISSING_RESULT",
     }

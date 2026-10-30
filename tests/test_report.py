@@ -5,11 +5,18 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from conftest import make_result, row
+from conftest import DEMO_PATIENTS, make_result, row
 from lab_intake.engine import IntakeRun, intake, run_rules
 from lab_intake.report import CLINICIAN_DECIDES, render_history, render_report
 from lab_intake.rules import RuleContext, default_rules
-from lab_intake.storage import history, latest_check, save_check, save_orders, save_results
+from lab_intake.storage import (
+    history,
+    latest_check,
+    save_check,
+    save_orders,
+    save_patients,
+    save_results,
+)
 
 RUN_AT = datetime(2026, 3, 3, 9, 0, tzinfo=timezone.utc)
 
@@ -21,7 +28,8 @@ def has_columns(text: str, *columns: str) -> bool:
 
 
 def run_and_save(db, settings, results_path, orders_path):
-    run = intake(results_path, orders_path, settings)
+    run = intake(results_path, orders_path, settings, patients=DEMO_PATIENTS)
+    save_patients(db, DEMO_PATIENTS)
     save_orders(db, run.orders)
     save_results(db, run.results)
     save_check(db, run, str(results_path), str(orders_path), run_at=RUN_AT)
@@ -34,7 +42,7 @@ def test_report_groups_flags_by_rule_with_patient_test_value_unit_and_range(
     results = write_results(
         [
             row(result_id="RES-LOW", patient_id="PAT-0001", value="64"),
-            row(result_id="RES-NEAR", patient_id="PAT-0002", value="98"),
+            row(result_id="RES-NEAR", patient_id="PAT-0002", value="110"),
             row(result_id="RES-HIGHK", patient_id="PAT-0003", test_code="K", value="5.4", unit="mmol/L"),
         ]
     )
@@ -43,13 +51,21 @@ def test_report_groups_flags_by_rule_with_patient_test_value_unit_and_range(
 
     text = render_report(latest_check(db), settings)
 
-    assert "Lab result check 1 at 2026-03-03T09:00:00+00:00 (release 1.0.0" in text
+    assert text.startswith("FLAGGED RESULTS REPORT\n")
+    assert "Check run 1, 2026-03-03 09:00 UTC. Release 1.0.0, settings ." in text
+    assert "4 flags, 0 rejected rows" in text
+    # Column headings sit above the first group and line up with the columns.
+    heading = next(line for line in text.splitlines() if line.lstrip().startswith("PATIENT"))
+    first_flag = next(line for line in text.splitlines() if line.lstrip().startswith("PAT-"))
+    assert heading.index("PATIENT") == first_flag.index("PAT-")
+    assert heading.index("TEST") == first_flag.index(first_flag.split()[1])
+    assert heading.index("RANGE APPLIED") == first_flag.index("range ")
     # Groups are headed by rule, serious ones first.
     assert text.index("MISSING_RESULT (1)") < text.index("OUT_OF_RANGE (2)") < text.index("BORDERLINE (1)")
     # Each line carries patient, test, the lab's value and unit, and the settings' range.
     assert has_columns(text, "PAT-0001", "GLU", "64 mg/dL", "range 70-99 mg/dL")
     assert has_columns(text, "PAT-0003", "K", "5.4 mmol/L", "range 3.5-5.1 mmol/L")
-    assert has_columns(text, "PAT-0002", "GLU", "98 mg/dL", "range 70-99 mg/dL")
+    assert has_columns(text, "PAT-0002", "GLU", "110 mg/dL", "range 70-99 mg/dL")
     assert has_columns(text, "PAT-0004", "HGB", "no result", "range 12-17.5 g/dL")
     assert text.rstrip().endswith(CLINICIAN_DECIDES)
 
@@ -78,7 +94,12 @@ def test_report_lists_rejected_rows_with_their_reason(settings, db, write_result
 
     text = render_report(latest_check(db), settings)
 
+    assert "0 flags, 1 rejected row" in text  # the good row is normal; singular when it is one
     assert "Rejected rows (1)" in text
+    heading = next(line for line in text.splitlines() if line.lstrip().startswith("LINE"))
+    reject_line = next(line for line in text.splitlines() if line.lstrip().startswith("line "))
+    assert heading.index("RECORD ID") == reject_line.index("RES-BAD")
+    assert heading.index("REASON CODE") == reject_line.index("VALUE_NOT_NUMERIC")
     assert "RES-BAD" in text
     assert "VALUE_NOT_NUMERIC" in text
     assert "value 'ninety' is not a number" in text
@@ -93,8 +114,9 @@ def test_history_shows_each_stored_result_in_order_and_which_were_flagged(settin
         make_result(85.0, result_id="RES-1", patient_id="PAT-0001"),
         make_result(64.0, result_id="RES-2", patient_id="PAT-0001"),
     ]
+    save_patients(db, DEMO_PATIENTS)
     save_results(db, results)
-    flags = run_rules(RuleContext.build(settings, results=results))
+    flags = run_rules(RuleContext.build(settings, results=results, patients=DEMO_PATIENTS))
     run = IntakeRun(settings=settings, results=results, flags=flags, rules=default_rules())
     save_check(db, run, run_at=RUN_AT)
 
@@ -104,6 +126,18 @@ def test_history_shows_each_stored_result_in_order_and_which_were_flagged(settin
     assert "85 mg/dL" in text and "64 mg/dL" in text
     assert text.count("flagged: OUT_OF_RANGE") == 1
     assert text.rstrip().endswith(CLINICIAN_DECIDES)
+
+
+def test_history_shows_what_a_corrected_result_used_to_be(settings, db):
+    save_patients(db, DEMO_PATIENTS)
+    save_results(db, [make_result(5.8, "K", result_id="RES-K", patient_id="PAT-0001")])
+    save_results(db, [make_result(4.8, "K", result_id="RES-K", patient_id="PAT-0001")])
+
+    text = render_history("PAT-0001", "K", history(db, "PAT-0001", "K"), settings)
+
+    assert "4.8 mmol/L" in text
+    assert "corrected: was 5.8 mmol/L" in text
+    assert text.count("2026-03-01") == 1  # one result, not two
 
 
 def test_history_with_nothing_stored(settings, db):

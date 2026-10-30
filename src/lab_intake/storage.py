@@ -6,8 +6,11 @@ function runs inside one transaction, so either the whole batch lands or
 none of it does. The caller closes the connection when the work is done.
 
 Results are keyed on the lab's own result_id, so loading the same file twice
-stores each result once. Every flag belongs to a check run, so the history
-can say which run, release and settings produced it.
+stores each result once. A result that arrives again under the same id with
+different content is a correction: the results table takes the new values
+and the old ones go to result_revisions, so the history shows what changed.
+Every flag belongs to a check run, so the history can say which run, release
+and settings produced it.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -25,10 +28,11 @@ from .models import LabResult, OrderedTest
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS patients (
-    patient_id   TEXT PRIMARY KEY,
-    display_name TEXT,
-    birth_date   TEXT,
-    sex          TEXT
+    patient_id       TEXT PRIMARY KEY,
+    display_name     TEXT,
+    birth_date       TEXT,
+    sex              TEXT,
+    last_result_date TEXT               -- collection date of the newest stored result
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -92,7 +96,23 @@ CREATE TABLE IF NOT EXISTS rejected_rows (
     reason       TEXT NOT NULL
 ) STRICT;
 
+-- The previous version of a result the lab corrected. results holds the
+-- current version; nothing is ever lost.
+CREATE TABLE IF NOT EXISTS result_revisions (
+    revision_id    INTEGER PRIMARY KEY,
+    result_id      TEXT NOT NULL REFERENCES results(result_id),
+    patient_id     TEXT NOT NULL,
+    test_code      TEXT NOT NULL,
+    value          REAL,
+    unit           TEXT NOT NULL,
+    collected_date TEXT NOT NULL,
+    reported_date  TEXT NOT NULL,
+    order_id       TEXT,
+    replaced_at    TEXT NOT NULL
+) STRICT;
+
 CREATE INDEX IF NOT EXISTS idx_results_patient_test ON results(patient_id, test_code);
+CREATE INDEX IF NOT EXISTS idx_revisions_result     ON result_revisions(result_id);
 CREATE INDEX IF NOT EXISTS idx_results_order        ON results(order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_patient_test  ON orders(patient_id, test_code);
 CREATE INDEX IF NOT EXISTS idx_flags_run            ON flags(check_run_id);
@@ -110,7 +130,25 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _add_last_result_date(conn)
     return conn
+
+
+def _add_last_result_date(conn: sqlite3.Connection) -> None:
+    """Bring a database made before the inactivity column up to date.
+
+    CREATE TABLE IF NOT EXISTS leaves an existing table alone, so the column
+    is added here and filled from the results already stored. Runs once.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(patients)")}
+    if "last_result_date" in columns:
+        return
+    with conn:
+        conn.execute("ALTER TABLE patients ADD COLUMN last_result_date TEXT")
+        conn.execute(
+            "UPDATE patients SET last_result_date = "
+            "(SELECT max(collected_date) FROM results r WHERE r.patient_id = patients.patient_id)"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -145,34 +183,68 @@ def save_orders(conn: sqlite3.Connection, orders: Iterable[OrderedTest]) -> None
         )
 
 
-def save_results(conn: sqlite3.Connection, results: Iterable[LabResult]) -> None:
+RESULT_FIELDS = (
+    "patient_id", "test_code", "value", "unit", "collected_date", "reported_date", "order_id"
+)
+
+
+def save_results(
+    conn: sqlite3.Connection,
+    results: Iterable[LabResult],
+    received_at: datetime | None = None,
+) -> None:
     """Store a batch of clean results in one transaction.
 
-    A result_id already in the database is left as it is, so the same file
-    can be loaded twice without storing anything twice. Any other problem
-    with any row rolls the whole batch back, including a result that names
-    an order the database does not have: save the orders first.
+    A result_id already in the database with the same content is left as it
+    is, so the same file can be loaded twice without storing anything twice.
+    The same id with different content is a correction from the lab: the
+    old version is copied to result_revisions and the result is updated.
+    Any other problem with any row rolls the whole batch back, including a
+    result that names an order the database does not have: save the orders
+    first.
     """
     results = list(results)
+    received_at = received_at or datetime.now(timezone.utc)
     with conn:
         _ensure_patients(conn, (r.patient_id for r in results))
-        conn.executemany(
-            "INSERT INTO results (result_id, patient_id, test_code, value, unit, "
-            "collected_date, reported_date, order_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(result_id) DO NOTHING",
-            [
-                (
-                    r.result_id,
-                    r.patient_id,
-                    r.test_code,
-                    r.value,
-                    r.unit,
-                    r.collected_date.isoformat(),
-                    r.reported_date.isoformat(),
-                    r.order_id or None,  # the file left it blank
+        for r in results:
+            incoming = (
+                r.patient_id,
+                r.test_code,
+                r.value,
+                r.unit,
+                r.collected_date.isoformat(),
+                r.reported_date.isoformat(),
+                r.order_id or None,  # the file left it blank
+            )
+            current = conn.execute(
+                f"SELECT {', '.join(RESULT_FIELDS)} FROM results WHERE result_id = ?",
+                (r.result_id,),
+            ).fetchone()
+            if current is None:
+                conn.execute(
+                    f"INSERT INTO results (result_id, {', '.join(RESULT_FIELDS)}) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (r.result_id, *incoming),
                 )
-                for r in results
-            ],
+            elif tuple(current) != incoming:
+                conn.execute(
+                    f"INSERT INTO result_revisions (result_id, {', '.join(RESULT_FIELDS)}, "
+                    "replaced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (r.result_id, *current, received_at.isoformat(timespec="seconds")),
+                )
+                conn.execute(
+                    f"UPDATE results SET {', '.join(f'{f} = ?' for f in RESULT_FIELDS)} "
+                    "WHERE result_id = ?",
+                    (*incoming, r.result_id),
+                )
+        # Recomputed from the stored results, so it is right whether this
+        # batch was newer, older, or already there.
+        conn.executemany(
+            "UPDATE patients SET last_result_date = "
+            "(SELECT max(collected_date) FROM results r WHERE r.patient_id = ?) "
+            "WHERE patient_id = ?",
+            [(patient_id, patient_id) for patient_id in {r.patient_id for r in results}],
         )
 
 
@@ -264,16 +336,34 @@ class SavedCheck:
 
 def latest_check(conn: sqlite3.Connection) -> SavedCheck | None:
     """The most recent check run, or None if the tool has never run."""
-    run = conn.execute(
-        "SELECT * FROM check_runs ORDER BY check_run_id DESC LIMIT 1"
-    ).fetchone()
+    return load_check(conn)
+
+
+def load_check(conn: sqlite3.Connection, check_run_id: int | None = None) -> SavedCheck | None:
+    """One stored check run with its flags and rejected rows.
+
+    With no id, the most recent run. Returns None when there is no such run,
+    so a report can be shown again later without running the files again.
+    """
+    if check_run_id is None:
+        run = conn.execute(
+            "SELECT * FROM check_runs ORDER BY check_run_id DESC LIMIT 1"
+        ).fetchone()
+    else:
+        run = conn.execute(
+            "SELECT * FROM check_runs WHERE check_run_id = ?", (check_run_id,)
+        ).fetchone()
     if run is None:
         return None
 
     flags = conn.execute(
         "SELECT f.rule_code, f.severity, f.patient_id, f.test_code, f.result_id, "
-        "       f.order_id, f.message, r.value, r.unit "
-        "FROM flags f LEFT JOIN results r ON r.result_id = f.result_id "
+        "       f.order_id, f.message, r.value, r.unit, r.collected_date, "
+        "       o.ordered_date, p.sex, p.birth_date "
+        "FROM flags f "
+        "LEFT JOIN results r ON r.result_id = f.result_id "
+        "LEFT JOIN orders o ON o.order_id = f.order_id "
+        "LEFT JOIN patients p ON p.patient_id = f.patient_id "
         "WHERE f.check_run_id = ? ORDER BY f.flag_id",
         (run["check_run_id"],),
     ).fetchall()
@@ -285,17 +375,49 @@ def latest_check(conn: sqlite3.Connection) -> SavedCheck | None:
     return SavedCheck(run=run, flags=flags, rejected=rejected)
 
 
+def inactive_patients(
+    conn: sqlite3.Connection, as_of: date, years: int = 10
+) -> list[sqlite3.Row]:
+    """Patients whose newest stored result was collected *years* or more ago.
+
+    A patient with no stored result has no date to measure from and is not
+    listed. Oldest first, so the longest-inactive patient is at the top.
+    """
+    cutoff = _years_before(as_of, years).isoformat()
+    return conn.execute(
+        "SELECT patient_id, display_name, last_result_date FROM patients "
+        "WHERE last_result_date IS NOT NULL AND last_result_date <= ? "
+        "ORDER BY last_result_date, patient_id",
+        (cutoff,),
+    ).fetchall()
+
+
+def _years_before(day: date, years: int) -> date:
+    """The same calendar day *years* earlier; 29 February falls back to the 28th."""
+    try:
+        return day.replace(year=day.year - years)
+    except ValueError:
+        return day.replace(year=day.year - years, day=28)
+
+
 def history(conn: sqlite3.Connection, patient_id: str, test_code: str) -> list[sqlite3.Row]:
     """Every stored result for one patient and test, oldest first.
 
     Each row carries the rule codes that have ever been flagged against it,
-    as a comma-separated string, or None if it was never flagged.
+    as a comma-separated string, or None if it was never flagged, and the
+    value and unit the lab last corrected, or None if never corrected.
     """
     return conn.execute(
         "SELECT r.result_id, r.collected_date, r.reported_date, r.value, r.unit, "
-        "       p.display_name, "
+        "       p.display_name, p.sex, p.birth_date, "
         "       (SELECT group_concat(DISTINCT f.rule_code) FROM flags f "
-        "        WHERE f.result_id = r.result_id) AS flags "
+        "        WHERE f.result_id = r.result_id) AS flags, "
+        "       (SELECT count(*) FROM result_revisions v "
+        "        WHERE v.result_id = r.result_id) AS corrections, "
+        "       (SELECT v.value FROM result_revisions v WHERE v.result_id = r.result_id "
+        "        ORDER BY v.revision_id DESC LIMIT 1) AS previous_value, "
+        "       (SELECT v.unit FROM result_revisions v WHERE v.result_id = r.result_id "
+        "        ORDER BY v.revision_id DESC LIMIT 1) AS previous_unit "
         "FROM results r JOIN patients p ON p.patient_id = r.patient_id "
         "WHERE r.patient_id = ? AND r.test_code = ? "
         "ORDER BY r.collected_date, r.result_id",
