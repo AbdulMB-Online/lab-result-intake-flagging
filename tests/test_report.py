@@ -128,6 +128,18 @@ def test_history_shows_each_stored_result_in_order_and_which_were_flagged(settin
     assert text.rstrip().endswith(CLINICIAN_DECIDES)
 
 
+def test_history_shows_what_a_corrected_result_used_to_be(settings, db):
+    save_patients(db, DEMO_PATIENTS)
+    save_results(db, [make_result(5.8, "K", result_id="RES-K", patient_id="PAT-0001")])
+    save_results(db, [make_result(4.8, "K", result_id="RES-K", patient_id="PAT-0001")])
+
+    text = render_history("PAT-0001", "K", history(db, "PAT-0001", "K"), settings)
+
+    assert "4.8 mmol/L" in text
+    assert "corrected: was 5.8 mmol/L" in text
+    assert text.count("2026-03-01") == 1  # one result, not two
+
+
 def test_history_with_nothing_stored(settings, db):
     text = render_history("PAT-9999", "K", history(db, "PAT-9999", "K"), settings)
 

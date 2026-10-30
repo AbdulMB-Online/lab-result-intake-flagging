@@ -101,9 +101,14 @@ def render_history(
     ]
     for row in rows:
         flagged = f"  flagged: {row['flags']}" if row["flags"] else ""
+        corrected = ""
+        if row["corrections"]:
+            was = _value_text(row["previous_value"], row["previous_unit"])
+            times = f", corrected {row['corrections']} times" if row["corrections"] > 1 else ""
+            corrected = f"  corrected: was {was}{times}"
         lines.append(
             f"  {row['collected_date']}  {_value_text(row['value'], row['unit']):>16}"
-            f"  reported {row['reported_date']}{flagged}"
+            f"  reported {row['reported_date']}{flagged}{corrected}"
         )
     lines += ["", CLINICIAN_DECIDES]
     return "\n".join(lines) + "\n"
