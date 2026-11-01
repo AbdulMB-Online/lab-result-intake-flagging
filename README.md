@@ -7,10 +7,11 @@ check history in SQLite so staff can retrieve reports and earlier measurements.
 **Synthetic data only.** The tool flags and reports; it does not diagnose,
 interpret a patient's condition, or recommend treatment. The clinician decides.
 
-The current application version is **1.0.0**. It includes
-age/sex-based ranges, saved-report retrieval, optional report email, and an
-inactive-patient list. The versioned releases are still being prepared;
-[release status and procedure](#releases-and-rollback) appear below.
+The current application version is **1.1.0**. It adds checks for blank or
+unexpected units to the existing age/sex-based ranges, saved reports,
+correction history, optional report email, and inactive-patient list.
+[Version 1.0.0 is published](https://github.com/AbdulMB-Online/lab-result-intake-flagging/releases/tag/v1.0.0);
+version 1.1.0 is being prepared. See [releases and rollback](#releases-and-rollback).
 
 ## Run with Docker
 
@@ -38,11 +39,11 @@ lab run --results /inputs/results.csv \
   --orders /inputs/orders.csv --patients /inputs/patients.csv
 ```
 
-Actual first-run summary from the checked-in synthetic files at `1a9a92a`,
-verified in Docker on 30 October 2026:
+First-run summary with an empty database and the checked-in synthetic files,
+verified through the local CLI with version `1.1.0` on 1 November 2026:
 
 ```text
-Saved 50 results and 51 orders. Check run 1 recorded 9 flags and 11 rejected rows.
+Saved 52 results and 53 orders. Check run 1 recorded 11 flags and 11 rejected rows.
 ```
 
 The full report groups findings by severity and rule, then lists rejected rows
@@ -92,6 +93,7 @@ python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 export PYTHONPATH="$PWD/src"
+python -c "import lab_intake; print(lab_intake.__version__)"
 
 python -m lab_intake run --results data/results.csv \
   --orders data/orders.csv --patients data/patients.csv
@@ -151,8 +153,9 @@ with an assumed patient's range.
   results or enter the rules engine.
 - A blank value or a recognized marker such as `PENDING`, `NA`, or `N/A` is kept
   as a result with no numeric measurement and receives `MISSING_VALUE`.
-- A valid numeric record is kept even when a rule flags its value. The reported
-  unit is retained; blank or unexpected units are not yet flagged separately.
+- A valid numeric record is kept even when a rule flags its value or unit.
+  A blank unit or one that does not exactly match the configured unit receives
+  `UNEXPECTED_UNIT`. The reported value and unit are retained without conversion.
 
 A result naming an order answers that ID. For legacy rows without an order ID,
 matching uses patient, test, and a collection date on or after the order date.
@@ -221,12 +224,18 @@ command rather than selecting a default range.
 | `BORDERLINE` | In a fixed band outside the normal range | Adult GLU 69 mg/dL |
 | `MISSING_VALUE` | Result arrived without a number | TSH marked `PENDING` |
 | `MISSING_RESULT` | Supplied order has no matching accepted result | An order absent from the result file |
+| `UNEXPECTED_UNIT` | Numeric result has a blank or mismatched unit | GLU 85 mmol/L when the configured unit is mg/dL |
 | `NO_REFERENCE_RANGE` | Numeric result has no applicable demographic band | HGB with sex `X` |
 | `UNDER_18` | Numeric result belongs to a patient under 18 | GLU for a 17-year-old |
 | `SEX_NOT_APPLICABLE` | Numeric result has a sex listed in `error_for_sex` | PSA with sex `F` in this configuration |
 
-The last three findings prevent comparison against an unsuitable range.
-`BORDERLINE` has medium severity; the other current rules have high severity.
+`NO_REFERENCE_RANGE`, `UNDER_18`, and `SEX_NOT_APPLICABLE` prevent comparison
+against an unsuitable range. `UNEXPECTED_UNIT` uses an exact, case-sensitive
+match: `mg/dl` differs from `mg/dL`. It skips results without a numeric value
+and runs alongside the other rules, so a unit flag can accompany a range or
+demographic flag. It neither converts values nor suppresses range checks.
+
+There are eight rules. `BORDERLINE` has medium severity; the others have high severity.
 These are workflow labels. Independent subclasses of `ResultRule` produce the
 findings; most implement `check()` for one result, while `MissingResultRule`
 implements `evaluate()` across orders and results. The `RULES` registry selects
@@ -242,6 +251,7 @@ keys are enabled on every application connection, and all tables are `STRICT`.
 | `patients` | `patient_id` (PK), `display_name`, `birth_date`, `sex`, `last_result_date` |
 | `orders` | `order_id` (PK), `patient_id` (FK), `test_code`, `ordered_date` |
 | `results` | `result_id` (PK), `patient_id` (FK), `test_code`, `value`, `unit`, `collected_date`, `reported_date`, `order_id` (FK, nullable) |
+| `result_revisions` | `revision_id` (PK), `result_id` (FK), `patient_id`, `test_code`, `value`, `unit`, `collected_date`, `reported_date`, `order_id`, `replaced_at` |
 | `rules` | `rule_code` (PK), `description`, `severity`, `release` |
 | `check_runs` | `check_run_id` (PK), `run_at`, `release`, `settings_version`, `results_file`, `orders_file` |
 | `flags` | `flag_id` (PK), `check_run_id` (FK), `rule_code` (FK), `severity`, `patient_id` (FK), `test_code`, `result_id` (FK, nullable), `order_id` (FK, nullable), `message`, `details` (JSON text) |
@@ -253,14 +263,18 @@ uses a transaction; a check, its flags, and its rejection records are saved
 together. The full import uses separate transactions, so a later failure does
 not undo every earlier save.
 
-Repeated result/order IDs retain the stored record in this baseline. Every
-import still creates a new check. Corrected-result version history is not yet
-part of the reviewed merged baseline. `last_result_date` is added and backfilled
-when an older database is opened.
+An unchanged result with the same ID is ignored. When its fields change, the
+previous record is copied to `result_revisions` and `results` is updated;
+patient history shows the correction. Repeated order IDs retain the stored
+order. Every import creates a new check. `last_result_date` is added and
+backfilled when an older database is opened.
 
-Stored reports preserve findings and messages, but displayed ranges use current
-patient details and the settings supplied when the report is opened. A settings-version label is not a
-full settings snapshot: retain the matching configuration with each release.
+Stored reports preserve findings and messages, but display current result
+values. After a correction, an older report can therefore show the corrected
+value beside its original flag message. Displayed ranges use current patient
+details and the settings supplied when the report is opened. A settings-version
+label is not a full settings snapshot: retain the matching configuration with
+each release.
 History collects the rule codes previously associated with each result. Always
 read rejected rows alongside the flags; a report with no flags does not mean
 that rejected records were checked.
@@ -316,7 +330,7 @@ docker run --rm \
   lab-result-intake:dev restore --backup /backups/baseline.db
 ```
 
-Actual success output from the verified Docker run:
+Success output verified with the version `1.0.0` Docker image:
 
 ```text
 Backup saved to /backups/baseline.db
@@ -337,10 +351,11 @@ docker run --rm \
   lab-result-intake:dev history PAT-0002 GLU
 ```
 
-On 30 October 2026, source and restored database contents matched across all
-seven tables: 17 patients, 51 orders, 50 results, 7 rules, 1 check, 9 flags, and
-11 rejects. The history output matched exactly. A second restore to the same
-destination was refused without changing the restored data.
+On 30 October 2026, the version `1.0.0` Docker recovery check included a
+corrected result. Source, backup, and restored contents matched across all
+eight tables, including the correction revision. Patient history matched
+exactly. A second restore to the same destination was refused without changing
+the restored data. Repeat these checks for the `1.1.0` image before publishing it.
 
 For local recovery, after local setup:
 
@@ -374,65 +389,75 @@ inactivity, mail behavior, and backup/restore. Mail tests use mocks; neither
 they nor the CLI integration test prove live email delivery. Container volume
 persistence and release upgrade/rollback need their own demonstration.
 
-Verification for merged commit `1a9a92a`: **303 tests passed locally** on Python
-3.15; its GitHub Python 3.13 run also passed. Docker import, saved-report
-retrieval, history, inactivity, backup, restore, and overwrite refusal were
-verified separately on 30 October 2026. Published release rollback is still
-pending.
+Verification on 1 November 2026: **312 tests passed locally** on Python 3.15
+with application version `1.1.0`. A fresh CLI import recorded the release as
+`1.1.0` and produced both new unit findings. The release PR still needs its
+Python 3.13 CI check. Docker import, report retrieval, history, inactivity,
+correction history, backup, restore, and overwrite refusal were verified for
+`1.0.0` on 30 October 2026. The `1.1.0` image and upgrade/rollback demonstration
+remain to be verified.
 
 ## Releases and rollback
 
-| Release | Scope | Status at the reviewed baseline |
+| Release | Scope | Status |
 |---|---|---|
-| `1.0.0` | Current intake, seven rules, storage/report/history, inactivity, optional email, and recovery | Implemented; Git tag, versioned image handoff, and changelog entry pending |
-| `1.1.0` | Add `UNEXPECTED_UNIT` for a blank or mismatched unit; no automatic conversion | Planned; rule and release demonstration pending |
+| `1.0.0` | Intake, seven rules, correction history, reports, inactivity, optional email, and recovery | Published with a Git tag, Docker image archive, and settings file |
+| `1.1.0` | Adds `UNEXPECTED_UNIT` as the eighth rule; no automatic conversion | Implemented and tested locally; release preparation and image verification in progress |
 
-The unit rule remains Ansh's implementation task. The plan is to retain
-independent rule findings, so a mismatch may appear alongside a range flag.
-Confirm the new behavior and its tests before assigning the `1.1.0` version.
+The unit rule is merged, and the application version is `1.1.0`.
+[CHANGELOG.md](CHANGELOG.md) records the changes. The checked-in synthetic
+files include glucose with a mismatched unit and potassium with a blank unit.
+Version `1.1.0` introduces no database-schema or settings-format changes from
+the published `1.0.0`; both use settings format `1.2`.
 
-For each release:
+To finish the `1.1.0` release:
 
 1. Agree the release contents. Update `__version__` in
    `src/lab_intake/__init__.py`, add the matching `CHANGELOG.md` entry, and update
    the run instructions through a pull request.
-2. Merge the reviewed PR with passing CI. From that clean release commit, build
-   and check the image with synthetic inputs and a fresh volume.
-3. Tag that exact commit and retain its settings with the image. For the first
-   release, after the checks pass:
+2. Merge the reviewed PR with passing CI, update local `main`, and confirm the
+   working tree is clean and contains the release changes.
+3. Tag that exact commit locally, build from the tag, and retain its settings:
 
    ```bash
-   git tag -a v1.0.0 -m "Release 1.0.0 - Abdul Malik"
-   git archive v1.0.0 | docker build -t lab-result-intake:1.0.0 -
-   mkdir -p release-config/1.0.0
-   git show v1.0.0:config/settings.json > release-config/1.0.0/settings.json
+   git tag -a v1.1.0 -m "Release 1.1.0 - Abdul Malik"
+   git archive v1.1.0 | docker build -t lab-result-intake:1.1.0 -
+   mkdir -p dist/v1.1.0
+   git show v1.1.0:config/settings.json > dist/v1.1.0/settings.json
    ```
 
-   Verify that tagged image with the run and recovery commands above, using
-   its saved settings. Then publish the tag and export the tested image:
+4. Verify the tagged image with synthetic inputs, a fresh database volume,
+   and its saved settings. Adapt the run and recovery commands above to use
+   `lab-result-intake:1.1.0` and mount `dist/v1.1.0` at `/config`. Check both
+   unit findings and the report's `1.1.0` label, then complete the upgrade and
+   rollback demonstration below.
+5. After verification, publish the tag and export the tested image:
 
    ```bash
-   git push origin v1.0.0
-   docker image save -o lab-result-intake-1.0.0.tar lab-result-intake:1.0.0
+   git push origin v1.1.0
+   docker image save -o dist/v1.1.0/lab-result-intake-1.1.0.tar lab-result-intake:1.1.0
    ```
 
-   The tar file can be shared and loaded with
-   `docker image load -i lab-result-intake-1.0.0.tar`. Keep published version tags fixed. Repeat the
-   process with `1.1.0` only when its implementation is complete.
+6. Publish a GitHub release for `v1.1.0`, using its changelog entry and attaching
+   the image archive and `settings.json` from `dist/v1.1.0/`.
 
-To demonstrate upgrade and rollback after both releases exist:
+The shared image can be loaded with
+`docker image load -i lab-result-intake-1.1.0.tar`. Keep published tags fixed.
 
-1. Run `1.0.0` with its saved configuration on a dedicated history volume.
+Demonstrate upgrade and rollback using both versioned images before publishing
+`1.1.0`:
+
+1. Run `1.0.0` with its saved configuration on a dedicated `lab-release-history` volume.
    Record baseline result IDs/values and check IDs, then take a verified backup.
 2. Run `1.1.0` on the same volume with its corresponding configuration and a
    synthetic unexpected-unit case. Confirm the new flag and `1.1.0` check label.
 3. Return to the `1.0.0` image and its matching settings on that same volume.
-   For a baseline stored in `lab-history`:
+   With the `1.0.0` release settings saved under `dist/v1.0.0/`:
 
    ```bash
    docker run --rm \
-     --mount type=volume,source=lab-history,target=/data \
-     --mount "type=bind,source=$PWD/release-config/1.0.0,target=/config,readonly" \
+     --mount type=volume,source=lab-release-history,target=/data \
+     --mount "type=bind,source=$PWD/dist/v1.0.0,target=/config,readonly" \
      lab-result-intake:1.0.0 history PAT-0002 GLU
    ```
 
@@ -440,9 +465,9 @@ To demonstrate upgrade and rollback after both releases exist:
    may add flags, so history text need not be identical. Preserve the actual
    commands, versions, and comparison output as release evidence.
 
-Rollback compatibility must be tested. The older percentage-based settings and
-the current age/sex format are incompatible; changing the image alone does not
-switch the mounted settings. The current database also adds `last_result_date`.
+Rollback compatibility must be tested even though these releases share the
+same schema and settings format. Changing the image does not switch the
+mounted settings; retain the configuration shipped with each release.
 If the older image cannot use the upgraded database, restore the verified
 pre-upgrade backup to a fresh volume and account for work since that backup.
 Do not describe recovery from a backup as proof of an in-place rollback.
