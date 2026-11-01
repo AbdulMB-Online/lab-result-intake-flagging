@@ -1,6 +1,14 @@
 
 # Changelog
 
+## [1.1.0] - 2026-11-01
+
+### Added
+- `UNEXPECTED_UNIT` flags numeric results with blank units or units that do not exactly match the settings.
+- Unit checks preserve the reported value and run alongside existing rules, allowing multiple findings for one result.
+- Synthetic examples cover a mismatched glucose unit and a missing potassium unit.
+- Tests cover matching, mismatched, and blank units, missing values, and combinations with other rules.
+
 ## [1.0.0] - 2026-10-30
 
 ### Added

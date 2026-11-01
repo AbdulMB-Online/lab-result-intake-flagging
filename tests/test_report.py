@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 
 from conftest import DEMO_PATIENTS, make_result, row
+from lab_intake import __version__
 from lab_intake.engine import IntakeRun, intake, run_rules
 from lab_intake.report import CLINICIAN_DECIDES, render_history, render_report
 from lab_intake.rules import RuleContext, default_rules
@@ -52,7 +53,7 @@ def test_report_groups_flags_by_rule_with_patient_test_value_unit_and_range(
     text = render_report(latest_check(db), settings)
 
     assert text.startswith("FLAGGED RESULTS REPORT\n")
-    assert "Check run 1, 2026-03-03 09:00 UTC. Release 1.0.0, settings ." in text
+    assert f"Check run 1, 2026-03-03 09:00 UTC. Release {__version__}, settings ." in text
     assert "4 flags, 0 rejected rows" in text
     # Column headings sit above the first group and line up with the columns.
     heading = next(line for line in text.splitlines() if line.lstrip().startswith("PATIENT"))

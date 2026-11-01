@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 from conftest import make_order, make_result
+from lab_intake import __version__
 from lab_intake.engine import IntakeRun
 from lab_intake.models import Flag, LabResult, RejectedRecord
 from lab_intake.rules import default_rules
@@ -244,7 +245,7 @@ def test_a_check_records_the_release_and_settings_version(settings, db):
     save_check(db, a_run(settings), run_at=RUN_AT)
 
     run = latest_check(db).run
-    assert run["release"] == "1.0.0"
+    assert run["release"] == __version__
     assert run["settings_version"] == ""  # the test settings file carries no schema_version
 
 

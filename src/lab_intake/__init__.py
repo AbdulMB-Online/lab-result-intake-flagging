@@ -6,7 +6,7 @@ condition, interprets a result, or recommends treatment.
 
 #: The release in force. Stored with every check run so history says which
 #: version produced each flag. Bumped with each tagged release.
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from .engine import IntakeRun, intake, run_rules, sort_flags  # noqa: E402
 from .loader import FileFormatError, load_orders, load_results
