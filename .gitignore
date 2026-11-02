@@ -46,5 +46,14 @@ pip-delete-this-directory.txt
 # Local draft documentation
 /docs_temp/
 
-# Local draft documentation
-/docs_temp/
+# Keep only the explicitly required project documents
+/docs/*
+!/docs/client_brief.md
+!/docs/assumptions_log.md
+
+# Local assignment and business-impact draft
+/Task.md
+/business_imapct.md
+
+# macOS metadata
+.DS_Store
